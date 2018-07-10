@@ -3809,6 +3809,7 @@ void handle_advanced() {
     Settings.ArduinoOTAEnable = isFormItemChecked(F("arduinootaenable"));
     Settings.UseRTOSMultitasking = isFormItemChecked(F("usertosmultitasking"));
     Settings.MQTTUseUnitNameAsClientId = isFormItemChecked(F("mqttuseunitnameasclientid"));
+    Settings.MQTTUseUserNameAsClientId = isFormItemChecked(F("mqttuseuserameasclientid"));
     Settings.Latitude = getFormItemFloat(F("latitude"));
     Settings.Longitude = getFormItemFloat(F("longitude"));
 
@@ -3831,6 +3832,7 @@ void handle_advanced() {
   addFormNumericBox( F("Message Interval"), F("messagedelay"), Settings.MessageDelay, 0, INT_MAX);
   addUnit(F("ms"));
   addFormCheckBox(F("MQTT usage unit name as ClientId"), F("mqttuseunitnameasclientid"), Settings.MQTTUseUnitNameAsClientId);
+  addFormCheckBox(F("MQTT usage user name as ClientId"), F("mqttuseuserameasclientid"), Settings.MQTTUseUserNameAsClientId);
 
   addFormSubHeader(F("NTP Settings"));
 

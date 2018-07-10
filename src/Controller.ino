@@ -144,6 +144,9 @@ bool MQTTConnect(int controller_idx)
     clientid += F("_");
     clientid += Settings.Unit;
   }
+  else if(Settings.MQTTUseUserNameAsClientId){
+    clientid = SecuritySettings.ControllerUser[controller_idx];
+  }
   else{
     clientid = F("ESPClient_");
     clientid += WiFi.macAddress();
@@ -175,6 +178,18 @@ bool MQTTConnect(int controller_idx)
   boolean willRetain = true;
 
   if ((SecuritySettings.ControllerUser[controller_idx] != 0) && (SecuritySettings.ControllerPassword[controller_idx] != 0)) {
+    String log = F("MQTT : Connecting to broker ");
+    log += ControllerSettings.getHost();
+    log += " at port ";
+    log +=ControllerSettings.Port;
+    log += " with client ID: ";
+    log += clientid;
+    log += " user name: ";
+    log += SecuritySettings.ControllerUser[controller_idx];
+    // log += " password: ";
+    // log += SecuritySettings.ControllerPassword[controller_idx];
+
+    addLog(LOG_LEVEL_INFO, log);
     MQTTresult = MQTTclient.connect(clientid.c_str(), SecuritySettings.ControllerUser[controller_idx], SecuritySettings.ControllerPassword[controller_idx],
                                     LWTTopic.c_str(), willQos, willRetain, LWTMessageDisconnect.c_str());
   } else {
