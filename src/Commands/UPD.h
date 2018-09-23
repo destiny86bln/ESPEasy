@@ -2,7 +2,7 @@
 #define COMMAND_UDP_H
 
 
-bool Command_UDP_Test (struct EventStruct *event, const char* Line)
+String Command_UDP_Test (struct EventStruct *event, const char* Line)
 {
   for (byte x = 0; x < event->Par2; x++)
   {
@@ -10,18 +10,18 @@ bool Command_UDP_Test (struct EventStruct *event, const char* Line)
     eventName += x;
     SendUDPCommand(event->Par1, (char*)eventName.c_str(), eventName.length());
   }
-  return true;
+  return return_command_success();
 }
 
-bool Command_UDP_Port(struct EventStruct *event, const char* Line)
+String Command_UDP_Port(struct EventStruct *event, const char* Line)
 {
-  return Command_GetORSetBool(F("UDPPort:"),
+  return Command_GetORSetBool(event, F("UDPPort:"),
    Line,
    (bool *)&Settings.UDPPort,
    1);
 }
 
-bool Command_UPD_SendTo(struct EventStruct *event, const char* Line)
+String Command_UPD_SendTo(struct EventStruct *event, const char* Line)
 {
   String eventName = Line;
   eventName = eventName.substring(7);
@@ -31,20 +31,18 @@ bool Command_UPD_SendTo(struct EventStruct *event, const char* Line)
     eventName = eventName.substring(index + 1);
     SendUDPCommand(event->Par1, (char*)eventName.c_str(), eventName.length());
   }
-  return true;
+  return return_command_success();
 }
 
 
-bool Command_UDP_SendToUPD(struct EventStruct *event, const char* Line)
+String Command_UDP_SendToUPD(struct EventStruct *event, const char* Line)
 {
-  bool success = false;
   if (wifiStatus == ESPEASY_WIFI_SERVICES_INITIALIZED) {
-    success = true;
     String strLine = Line;
     String ip = parseString(strLine, 2);
     String port = parseString(strLine, 3);
-    int msgpos = getParamStartPos(strLine, 4);
-    String message = strLine.substring(msgpos);
+    if (!isInt(port)) return return_command_failed();
+    String message = parseStringToEndKeepCase(strLine, 4);
     IPAddress UDP_IP;
     if(UDP_IP.fromString(ip)) {
       portUDP.beginPacket(UDP_IP, port.toInt());
@@ -56,8 +54,9 @@ bool Command_UDP_SendToUPD(struct EventStruct *event, const char* Line)
       #endif
       portUDP.endPacket();
     }
+    return return_command_success();
   }
-  return success;  
+  return return_not_connected();
 }
 
 #endif // COMMAND_UDP_H

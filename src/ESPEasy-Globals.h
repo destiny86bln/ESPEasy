@@ -11,7 +11,6 @@
 // Set default configuration settings if you want (not mandatory)
 // You can always change these during runtime and save to eeprom
 // After loading firmware, issue a 'reset' command to load the defaults.
-
 // --- Basic Config Settings ------------------------------------------------------------------------
 #define DEFAULT_NAME        "ESP_Easy"                  // Enter your device friendly name
 #define UNIT                            0                                       // Unit Number
@@ -189,13 +188,43 @@
 #endif
 
 #define MAX_FLASHWRITES_PER_DAY           100 // per 24 hour window
-#define INPUT_COMMAND_SIZE                 80
+#define INPUT_COMMAND_SIZE                240 // Affects maximum command length in rules and other commands
 
 #define NODE_TYPE_ID_ESP_EASY_STD           1
 #define NODE_TYPE_ID_ESP_EASYM_STD         17
 #define NODE_TYPE_ID_ESP_EASY32_STD        33
 #define NODE_TYPE_ID_ARDUINO_EASY_STD      65
 #define NODE_TYPE_ID_NANO_EASY_STD         81
+
+#define TIMER_20MSEC                        1
+#define TIMER_100MSEC                       2
+#define TIMER_1SEC                          3
+#define TIMER_30SEC                         4
+#define TIMER_MQTT                          5
+#define TIMER_STATISTICS                    6
+#define TIMER_MQTT_DELAY_QUEUE              7
+#define TIMER_C001_DELAY_QUEUE              8
+#define TIMER_C003_DELAY_QUEUE              9
+#define TIMER_C004_DELAY_QUEUE             10
+#define TIMER_C007_DELAY_QUEUE             11
+#define TIMER_C008_DELAY_QUEUE             12
+#define TIMER_C009_DELAY_QUEUE             13
+#define TIMER_C010_DELAY_QUEUE             14
+#define TIMER_C011_DELAY_QUEUE             15
+#define TIMER_C012_DELAY_QUEUE             16
+#define TIMER_C013_DELAY_QUEUE             17
+
+// Minimum delay between messages for a controller to send in msec.
+#define CONTROLLER_DELAY_QUEUE_DELAY_MAX   3600000
+#define CONTROLLER_DELAY_QUEUE_DELAY_DFLT  100
+// Queue length for controller messages not yet sent.
+#define CONTROLLER_DELAY_QUEUE_DEPTH_MAX   25
+#define CONTROLLER_DELAY_QUEUE_DEPTH_DFLT  10
+// Number of retries to send a message by a controller.
+// N.B. Retries without a connection to wifi do not count as retry.
+#define CONTROLLER_DELAY_QUEUE_RETRY_MAX   10
+#define CONTROLLER_DELAY_QUEUE_RETRY_DFLT  10
+
 
 #define PLUGIN_INIT_ALL                     1
 #define PLUGIN_INIT                         2
@@ -289,15 +318,17 @@
 #define PLUGIN_EXTRACONFIGVAR_MAX          16
 #define CPLUGIN_MAX                        16
 #define NPLUGIN_MAX                         4
-#define UNIT_MAX                           32 // Only relevant for UDP unicast message 'sweeps' and the nodelist.
+#define UNIT_MAX                          254 // unit 255 = broadcast
 #define RULES_TIMER_MAX                     8
-#define SYSTEM_TIMER_MAX                    8
-#define SYSTEM_CMD_TIMER_MAX                2
 #define PINSTATE_TABLE_MAX                 32
 #define RULES_MAX_SIZE                   2048
 #define RULES_MAX_NESTING_LEVEL             3
 #define RULESETS_MAX                        4
 #define RULES_BUFFER_SIZE                  64
+#define NAME_FORMULA_LENGTH_MAX            40
+#define RULES_IF_MAX_NESTING_LEVEL          4
+
+#define UDP_PACKETSIZE_MAX               2048
 
 #define PIN_MODE_UNDEFINED                  0
 #define PIN_MODE_INPUT                      1
@@ -329,23 +360,30 @@
 #define SENSOR_TYPE_LONG                   20
 #define SENSOR_TYPE_WIND                   21
 
+#define UNIT_NUMBER_MAX                  9999  // Stored in Settings.Unit
+#define DOMOTICZ_MAX_IDX            999999999  // Looks like it is an unsigned int, so could be up to 4 bln.
+
 #define VALUE_SOURCE_SYSTEM                 1
 #define VALUE_SOURCE_SERIAL                 2
 #define VALUE_SOURCE_HTTP                   3
 #define VALUE_SOURCE_MQTT                   4
 #define VALUE_SOURCE_UDP                    5
+#define VALUE_SOURCE_WEB_FRONTEND           6
 
 #define BOOT_CAUSE_MANUAL_REBOOT            0
 #define BOOT_CAUSE_COLD_BOOT                1
 #define BOOT_CAUSE_DEEP_SLEEP               2
 #define BOOT_CAUSE_EXT_WD                  10
 
-#define DAT_TASKS_SIZE                   2048
-#define DAT_TASKS_CUSTOM_OFFSET          1024
+#define DAT_TASKS_DISTANCE               2048  // DAT_TASKS_SIZE + DAT_TASKS_CUSTOM_SIZE
+#define DAT_TASKS_SIZE                   1024
+#define DAT_TASKS_CUSTOM_OFFSET          1024  // Equal to DAT_TASKS_SIZE
 #define DAT_TASKS_CUSTOM_SIZE            1024
 #define DAT_CUSTOM_CONTROLLER_SIZE       1024
 #define DAT_CONTROLLER_SIZE              1024
 #define DAT_NOTIFICATION_SIZE            1024
+
+#define DAT_BASIC_SETTINGS_SIZE          4096
 
 #if defined(ESP8266)
   #define DAT_OFFSET_TASKS                 4096  // each task = 2k, (1024 basic + 1024 bytes custom), 12 max
@@ -359,6 +397,47 @@
   #define DAT_OFFSET_TASKS                32768  // each task = 2k, (1024 basic + 1024 bytes custom), 32 max
   #define CONFIG_FILE_SIZE               131072
 #endif
+
+// Forward declaration
+struct ControllerSettingsStruct;
+void scheduleNextDelayQueue(unsigned long id, unsigned long nextTime);
+String LoadControllerSettings(int ControllerIndex, ControllerSettingsStruct& controller_settings);
+String get_formatted_Controller_number(int controller_index);
+bool loglevelActiveFor(byte logLevel);
+void addToLog(byte loglevel, const String& string);
+void addToLog(byte logLevel, const __FlashStringHelper* flashString);
+void statusLED(boolean traffic);
+void backgroundtasks();
+
+bool getBitFromUL(uint32_t number, byte bitnr);
+void setBitToUL(uint32_t& number, byte bitnr, bool value);
+
+enum SettingsType {
+  BasicSettings_Type = 0,
+  TaskSettings_Type,
+  CustomTaskSettings_Type,
+  ControllerSettings_Type,
+  CustomControllerSettings_Type,
+  NotificationSettings_Type,
+
+  SettingsType_MAX
+
+};
+bool getSettingsParameters(SettingsType settingsType, int index, int& offset, int& max_size);
+String getSettingsTypeString(SettingsType settingsType) {
+  switch (settingsType) {
+    case BasicSettings_Type:            return F("Settings");
+    case TaskSettings_Type:             return F("TaskSettings");
+    case CustomTaskSettings_Type:       return F("CustomTaskSettings");
+    case ControllerSettings_Type:       return F("ControllerSettings");
+    case CustomControllerSettings_Type: return F("CustomControllerSettings");
+    case NotificationSettings_Type:     return F("NotificationSettings");
+    default:
+      break;
+  }
+  return String();
+}
+bool showSettingsFileLayout = false;
 
 /*
         To modify the stock configuration without changing this repo file :
@@ -374,6 +453,8 @@
 #include "ESPEasyTimeTypes.h"
 #include "I2CTypes.h"
 #include <I2Cdev.h>
+#include <map>
+#include <deque>
 
 #define FS_NO_GLOBALS
 #if defined(ESP8266)
@@ -441,10 +522,10 @@
   #define FILE_RULES        "/rules1.txt"
   #include <WiFi.h>
   #include  "esp32_ping.h"
-  #include <ESP32WebServer.h>
+  #include <WebServer.h>
   #include "SPIFFS.h"
   #include <rom/rtc.h>
-  ESP32WebServer WebServer(80);
+  WebServer WebServer(80);
   #ifdef FEATURE_MDNS
     #include <ESPmDNS.h>
   #endif
@@ -512,6 +593,9 @@ class TimingStats;
 #define LOADFILE_STATS  0
 #define LOOP_STATS      1
 
+/*********************************************************************************************\
+ * CRCStruct
+\*********************************************************************************************/
 struct CRCStruct{
   char compileTimeMD5[16+32+1]= "MD5_MD5_MD5_MD5_BoundariesOfTheSegmentsGoHere...";
   char binaryFilename[32+32+1]= "ThisIsTheDummyPlaceHolderForTheBinaryFilename64ByteLongFilenames";
@@ -542,7 +626,9 @@ int16_t I2C_readS16_reg(uint8_t i2caddr, byte reg);
 int16_t I2C_readS16_LE_reg(uint8_t i2caddr, byte reg);
 I2Cdev i2cdev;
 
-
+/*********************************************************************************************\
+ * SecurityStruct
+\*********************************************************************************************/
 struct SecurityStruct
 {
   SecurityStruct() {
@@ -574,50 +660,115 @@ struct SecurityStruct
   uint8_t       md5[16];
 } SecuritySettings;
 
+/*********************************************************************************************\
+ * SettingsStruct
+\*********************************************************************************************/
 struct SettingsStruct
 {
-  SettingsStruct() :
-    PID(0), Version(0), Build(0), IP_Octet(0), Unit(0), Delay(0),
-    Pin_i2c_sda(-1), Pin_i2c_scl(-1), Pin_status_led(-1), Pin_sd_cs(-1),
-    UDPPort(0), SyslogLevel(0), SerialLogLevel(0), WebLogLevel(0), SDLogLevel(0),
-    BaudRate(0), MessageDelay(0), deepSleep(0),
-    CustomCSS(false), DST(false), WDI2CAddress(0),
-    UseRules(false), UseSerial(false), UseSSDP(false), UseNTP(false),
-    WireClockStretchLimit(0), GlobalSync(false), ConnectionFailuresThreshold(0),
-    TimeZone(0), MQTTRetainFlag(false), InitSPI(false),
-    Pin_status_led_Inversed(false), deepSleepOnFail(false), UseValueLogger(false),
-    DST_Start(0), DST_End(0), UseRTOSMultitasking(false), Pin_Reset(-1),
-    SyslogFacility(DEFAULT_SYSLOG_FACILITY), StructSize(0), MQTTUseUnitNameAsClientId(0),MQTTUseUserNameAsClientId(0)
-    {
-      for (byte i = 0; i < CONTROLLER_MAX; ++i) {
-        Protocol[i] = 0;
-        ControllerEnabled[i] = false;
-        for (byte task = 0; task < TASKS_MAX; ++task) {
-          TaskDeviceID[i][task] = 0;
-          TaskDeviceSendData[i][task] = false;
-        }
-      }
-      for (byte task = 0; task < TASKS_MAX; ++task) {
-        TaskDeviceNumber[task] = 0;
-        OLD_TaskDeviceID[task] = 0;
-        TaskDevicePin1PullUp[task] = false;
-        for (byte cv = 0; cv < PLUGIN_CONFIGVAR_MAX; ++cv) {
-          TaskDevicePluginConfig[task][cv] = 0;
-        }
-        TaskDevicePin1Inversed[task] = false;
-        for (byte cv = 0; cv < PLUGIN_CONFIGFLOATVAR_MAX; ++cv) {
-          TaskDevicePluginConfigFloat[task][cv] = 0.0;
-        }
-        for (byte cv = 0; cv < PLUGIN_CONFIGLONGVAR_MAX; ++cv) {
-          TaskDevicePluginConfigLong[task][cv] = 0;
-        }
-        OLD_TaskDeviceSendData[task] = false;
-        TaskDeviceGlobalSync[task] = false;
-        TaskDeviceDataFeed[task] = 0;
-        TaskDeviceTimer[task] = 0;
-        TaskDeviceEnabled[task] = false;
-      }
+
+  SettingsStruct() {
+    clearAll();
+  }
+
+  // VariousBits1 defaults to 0, keep in mind when adding bit lookups.
+  bool appendUnitToHostname() {  return !getBitFromUL(VariousBits1, 1); }
+  void appendUnitToHostname(bool value) { setBitToUL(VariousBits1, 1, !value); }
+
+  void validate() {
+    if (UDPPort > 65535) UDPPort = 0;
+
+    if (Latitude  < -90.0  || Latitude > 90.0) Latitude = 0.0;
+    if (Longitude < -180.0 || Longitude > 180.0) Longitude = 0.0;
+    if (VariousBits1 > (1 << 30)) VariousBits1 = 0;
+  }
+
+  void clearAll() {
+    PID = 0;
+    Version = 0;
+    Build = 0;
+    IP_Octet = 0;
+    Unit = 0;
+    Delay = 0;
+    Pin_i2c_sda = -1;
+    Pin_i2c_scl = -1;
+    Pin_status_led = -1;
+    Pin_sd_cs = -1;
+    UDPPort = 0;
+    SyslogLevel = 0;
+    SerialLogLevel = 0;
+    WebLogLevel = 0;
+    SDLogLevel = 0;
+    BaudRate = 0;
+    MessageDelay = 0;
+    deepSleep = 0;
+    CustomCSS = false;
+    DST = false;
+    WDI2CAddress = 0;
+    UseRules = false;
+    UseSerial = false;
+    UseSSDP = false;
+    UseNTP = false;
+    WireClockStretchLimit = 0;
+    GlobalSync = false;
+    ConnectionFailuresThreshold = 0;
+    TimeZone = 0;
+    MQTTRetainFlag = false;
+    InitSPI = false;
+    Pin_status_led_Inversed = false;
+    deepSleepOnFail = false;
+    UseValueLogger = false;
+    DST_Start = 0;
+    DST_End = 0;
+    UseRTOSMultitasking = false;
+    Pin_Reset = -1;
+    SyslogFacility = DEFAULT_SYSLOG_FACILITY;
+    StructSize = 0;
+    MQTTUseUnitNameAsClientId = 0;
+    Latitude = 0.0;
+    Longitude = 0.0;
+    VariousBits1 = 0;
+
+    for (byte i = 0; i < CONTROLLER_MAX; ++i) {
+      Protocol[i] = 0;
+      ControllerEnabled[i] = false;
     }
+    for (byte i = 0; i < NOTIFICATION_MAX; ++i) {
+      Notification[i] = 0;
+      NotificationEnabled[i] = false;
+    }
+    for (byte task = 0; task < TASKS_MAX; ++task) {
+      clearTask(task);
+    }
+  }
+
+  void clearTask(byte task) {
+    for (byte i = 0; i < CONTROLLER_MAX; ++i) {
+      TaskDeviceID[i][task] = 0;
+      TaskDeviceSendData[i][task] = false;
+    }
+    TaskDeviceNumber[task] = 0;
+    OLD_TaskDeviceID[task] = 0;
+    TaskDevicePin1[task] = -1;
+    TaskDevicePin2[task] = -1;
+    TaskDevicePin3[task] = -1;
+    TaskDevicePort[task] = 0;
+    TaskDevicePin1PullUp[task] = false;
+    for (byte cv = 0; cv < PLUGIN_CONFIGVAR_MAX; ++cv) {
+      TaskDevicePluginConfig[task][cv] = 0;
+    }
+    TaskDevicePin1Inversed[task] = false;
+    for (byte cv = 0; cv < PLUGIN_CONFIGFLOATVAR_MAX; ++cv) {
+      TaskDevicePluginConfigFloat[task][cv] = 0.0;
+    }
+    for (byte cv = 0; cv < PLUGIN_CONFIGLONGVAR_MAX; ++cv) {
+      TaskDevicePluginConfigLong[task][cv] = 0;
+    }
+    OLD_TaskDeviceSendData[task] = false;
+    TaskDeviceGlobalSync[task] = false;
+    TaskDeviceDataFeed[task] = 0;
+    TaskDeviceTimer[task] = 0;
+    TaskDeviceEnabled[task] = false;
+  }
 
   unsigned long PID;
   int           Version;
@@ -678,12 +829,12 @@ struct SettingsStruct
   long          TaskDevicePluginConfigLong[TASKS_MAX][PLUGIN_CONFIGLONGVAR_MAX];
   boolean       OLD_TaskDeviceSendData[TASKS_MAX];
   boolean       TaskDeviceGlobalSync[TASKS_MAX];
-  byte          TaskDeviceDataFeed[TASKS_MAX];
+  byte          TaskDeviceDataFeed[TASKS_MAX];    // When set to 0, only read local connected sensorsfeeds
   unsigned long TaskDeviceTimer[TASKS_MAX];
   boolean       TaskDeviceEnabled[TASKS_MAX];
   boolean       ControllerEnabled[CONTROLLER_MAX];
   boolean       NotificationEnabled[NOTIFICATION_MAX];
-  unsigned int  TaskDeviceID[CONTROLLER_MAX][TASKS_MAX];
+  unsigned int  TaskDeviceID[CONTROLLER_MAX][TASKS_MAX];        // IDX number (mainly used by Domoticz)
   boolean       TaskDeviceSendData[CONTROLLER_MAX][TASKS_MAX];
   boolean       Pin_status_led_Inversed;
   boolean       deepSleepOnFail;
@@ -703,6 +854,7 @@ struct SettingsStruct
   //TODO: document config.dat somewhere here
   float         Latitude;
   float         Longitude;
+  uint32_t      VariousBits1;
 
   // FIXME @TD-er: As discussed in #1292, the CRC for the settings is now disabled.
   // make sure crc is the last value in the struct
@@ -711,9 +863,14 @@ struct SettingsStruct
 //  uint8_t       md5[16];
 } Settings;
 
+
+/*********************************************************************************************\
+ * ControllerSettingsStruct
+\*********************************************************************************************/
 struct ControllerSettingsStruct
 {
-  ControllerSettingsStruct() : UseDNS(false), Port(0) {
+  ControllerSettingsStruct() : UseDNS(false), Port(0),
+      MinimalTimeBetweenMessages(100), MaxQueueDepth(10), MaxRetry(10), DeleteOldest(false) {
     for (byte i = 0; i < 4; ++i) {
       IP[i] = 0;
     }
@@ -733,6 +890,18 @@ struct ControllerSettingsStruct
   char          MQTTLwtTopic[129];
   char          LWTMessageConnect[129];
   char          LWTMessageDisconnect[129];
+  unsigned int  MinimalTimeBetweenMessages;
+  unsigned int  MaxQueueDepth;
+  unsigned int  MaxRetry;
+  boolean       DeleteOldest; // Action to perform when buffer full, delete oldest, or ignore newest.
+
+  void validate() {
+    if (Port > 65535) Port = 0;
+    if (MinimalTimeBetweenMessages < 1) MinimalTimeBetweenMessages = 100;
+    if (MinimalTimeBetweenMessages > 3600000) MinimalTimeBetweenMessages = 100;
+    if (MaxQueueDepth > 25) MaxQueueDepth = 10;
+    if (MaxRetry > 10) MaxRetry = 10;
+  }
 
   IPAddress getIP() const {
     IPAddress host(IP[0], IP[1], IP[2], IP[3]);
@@ -772,7 +941,10 @@ struct ControllerSettingsStruct
     bool connected = false;
     while (retry > 0 && !connected) {
       --retry;
-      connected = client.connect(getIP(), Port);
+      // In case of domain name resolution error result can be negative.
+      // https://github.com/esp8266/Arduino/blob/18f643c7e2d6a0da9d26ff2b14c94e6536ab78c1/libraries/Ethernet/src/Dns.cpp#L44
+      // Thus must match the result with 1.
+      connected = (client.connect(getIP(), Port) == 1);
       if (connected) return true;
       if (!checkHostReachable(false))
         return false;
@@ -780,21 +952,22 @@ struct ControllerSettingsStruct
     return false;
   }
 
+  // Returns 1 if successful, 0 if there was a problem resolving the hostname or port
   int beginPacket(WiFiUDP &client) {
     if (!checkHostReachable(true)) {
       return 0; // Host not reachable
     }
     byte retry = 2;
     int connected = 0;
-    while (retry > 0 && !connected) {
+    while (retry > 0 && connected == 0) {
       --retry;
       connected = client.beginPacket(getIP(), Port);
       if (connected != 0) return connected;
       if (!checkHostReachable(false))
-        return false;
+        return 0;
       delay(10);
     }
-    return false;
+    return 0;
   }
 
   String getHostPortString() const {
@@ -829,6 +1002,10 @@ private:
 
 };
 
+
+/*********************************************************************************************\
+ * NotificationSettingsStruct
+\*********************************************************************************************/
 struct NotificationSettingsStruct
 {
   NotificationSettingsStruct() : Port(0), Pin1(0), Pin2(0) {
@@ -856,15 +1033,30 @@ struct NotificationSettingsStruct
   //its safe to extend this struct, up to 4096 bytes, default values in config are 0
 };
 
+/*********************************************************************************************\
+ * ExtraTaskSettingsStruct
+\*********************************************************************************************/
+
+// This is only used by some plugins to store extra settings like formula descriptions.
+// These settings can only be active for one plugin, meaning they have to be loaded
+// over and over again from flash when another active plugin uses these values.
+//FIXME @TD-er: Should think of another mechanism to make this more efficient.
 struct ExtraTaskSettingsStruct
 {
-  ExtraTaskSettingsStruct() : TaskIndex(0) {
-    TaskDeviceName[0] = 0;
+  ExtraTaskSettingsStruct() : TaskIndex(TASKS_MAX) {
+    clear();
+  }
+
+  void clear() {
+    TaskIndex = TASKS_MAX;
+    for (byte j = 0; j < (NAME_FORMULA_LENGTH_MAX + 1); ++j) {
+      TaskDeviceName[j] = 0;
+    }
     for (byte i = 0; i < VARS_PER_TASK; ++i) {
-      for (byte j = 0; j < 41; ++j) {
+      for (byte j = 0; j < (NAME_FORMULA_LENGTH_MAX + 1); ++j) {
         TaskDeviceFormula[i][j] = 0;
         TaskDeviceValueNames[i][j] = 0;
-        TaskDeviceValueDecimals[i] = 0;
+        TaskDeviceValueDecimals[i] = 2;
       }
     }
     for (byte i = 0; i < PLUGIN_EXTRACONFIGVAR_MAX; ++i) {
@@ -873,19 +1065,58 @@ struct ExtraTaskSettingsStruct
     }
   }
 
-  byte    TaskIndex;
-  char    TaskDeviceName[41];
-  char    TaskDeviceFormula[VARS_PER_TASK][41];
-  char    TaskDeviceValueNames[VARS_PER_TASK][41];
+  bool checkUniqueValueNames() {
+    for (int i = 0; i < (VARS_PER_TASK - 1); ++i) {
+      for (int j = i; j < VARS_PER_TASK; ++j) {
+        if (i != j && TaskDeviceValueNames[i][0] != 0) {
+          if (strcasecmp(TaskDeviceValueNames[i], TaskDeviceValueNames[j]) == 0)
+            return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool checkInvalidCharInNames(const char* name) {
+    int pos = 0;
+    while (*(name+pos) != 0) {
+      switch (*(name+pos)) {
+        case ',':
+        case ' ':
+        case '#':
+        case '[':
+        case ']':
+          return false;
+      }
+      ++pos;
+    }
+    return true;
+  }
+
+  bool checkInvalidCharInNames() {
+    if (!checkInvalidCharInNames(&TaskDeviceName[0])) return false;
+    for (int i = 0; i < (VARS_PER_TASK - 1); ++i) {
+      if (!checkInvalidCharInNames(&TaskDeviceValueNames[i][0])) return false;
+    }
+    return true;
+  }
+
+  byte    TaskIndex;  // Always < TASKS_MAX
+  char    TaskDeviceName[NAME_FORMULA_LENGTH_MAX + 1];
+  char    TaskDeviceFormula[VARS_PER_TASK][NAME_FORMULA_LENGTH_MAX + 1];
+  char    TaskDeviceValueNames[VARS_PER_TASK][NAME_FORMULA_LENGTH_MAX + 1];
   long    TaskDevicePluginConfigLong[PLUGIN_EXTRACONFIGVAR_MAX];
   byte    TaskDeviceValueDecimals[VARS_PER_TASK];
   int16_t TaskDevicePluginConfig[PLUGIN_EXTRACONFIGVAR_MAX];
 } ExtraTaskSettings;
 
+/*********************************************************************************************\
+ * EventStruct
+\*********************************************************************************************/
 struct EventStruct
 {
   EventStruct() :
-    Source(0), TaskIndex(0), ControllerIndex(0), ProtocolIndex(0), NotificationIndex(0),
+    Source(0), TaskIndex(TASKS_MAX), ControllerIndex(0), ProtocolIndex(0), NotificationIndex(0),
     BaseVarIndex(0), idx(0), sensorType(0), Par1(0), Par2(0), Par3(0), Par4(0), Par5(0),
     OriginTaskIndex(0), Data(NULL) {}
   EventStruct(const struct EventStruct& event):
@@ -893,7 +1124,13 @@ struct EventStruct
         , ProtocolIndex(event.ProtocolIndex), NotificationIndex(event.NotificationIndex)
         , BaseVarIndex(event.BaseVarIndex), idx(event.idx), sensorType(event.sensorType)
         , Par1(event.Par1), Par2(event.Par2), Par3(event.Par3), Par4(event.Par4), Par5(event.Par5)
-        , OriginTaskIndex(event.OriginTaskIndex), Data(event.Data) {}
+        , OriginTaskIndex(event.OriginTaskIndex)
+        , String1(event.String1)
+        , String2(event.String2)
+        , String3(event.String3)
+        , String4(event.String4)
+        , String5(event.String5)
+        , Data(event.Data) {}
 
   byte Source;
   byte TaskIndex; // index position in TaskSettings array, 0-11
@@ -919,6 +1156,10 @@ struct EventStruct
   byte *Data;
 };
 
+
+/*********************************************************************************************\
+ * LogStruct
+\*********************************************************************************************/
 #define LOG_STRUCT_MESSAGE_SIZE 128
 #ifdef ESP32
   #define LOG_STRUCT_MESSAGE_LINES 30
@@ -1037,44 +1278,73 @@ struct LogStruct {
 
 } Logging;
 
+std::deque<char> serialLogBuffer;
+unsigned long last_serial_log_emptied = 0;
+
+byte highest_active_log_level = 0;
+bool log_to_serial_disabled = false;
+// Do this in a template to prevent casting to String when not needed.
+#define addLog(L,S) if (loglevelActiveFor(L)) { addToLog(L,S); }
+
+/*********************************************************************************************\
+ * DeviceStruct
+\*********************************************************************************************/
 struct DeviceStruct
 {
   DeviceStruct() :
-    Number(0), Type(0), VType(0), Ports(0),
+    Number(0), Type(0), VType(0), Ports(0), ValueCount(0),
     PullUpOption(false), InverseLogicOption(false), FormulaOption(false),
-    ValueCount(0), Custom(false), SendDataOption(false), GlobalSyncOption(false),
+    Custom(false), SendDataOption(false), GlobalSyncOption(false),
     TimerOption(false), TimerOptional(false), DecimalsOnly(false) {}
-  byte Number;
-  byte Type;
-  byte VType;
-  byte Ports;
-  boolean PullUpOption;
-  boolean InverseLogicOption;
-  boolean FormulaOption;
-  byte ValueCount;
-  boolean Custom;
-  boolean SendDataOption;
-  boolean GlobalSyncOption;
-  boolean TimerOption;
-  boolean TimerOptional;
-  boolean DecimalsOnly;
-} Device[DEVICES_MAX + 1]; // 1 more because first device is empty device
 
+  bool connectedToGPIOpins() {
+    return (Type >= DEVICE_TYPE_SINGLE && Type <= DEVICE_TYPE_TRIPLE);
+  }
+
+
+  byte Number;  // Plugin ID number.   (PLUGIN_ID_xxx)
+  byte Type;    // How the device is connected. e.g. DEVICE_TYPE_SINGLE => connected through 1 datapin
+  byte VType;   // Type of value the plugin will return, used only for Domoticz
+  byte Ports;   // Port to use when device has multiple I/O pins  (N.B. not used much)
+  byte ValueCount;            // The number of output values of a plugin. The value should match the number of keys PLUGIN_VALUENAME1_xxx
+  boolean PullUpOption;       // Allow to set internal pull-up resistors.
+  boolean InverseLogicOption; // Allow to invert the boolean state (e.g. a switch)
+  boolean FormulaOption;      // Allow to enter a formula to convert values during read. (not possible with Custom enabled)
+  boolean Custom;
+  boolean SendDataOption;     // Allow to send data to a controller.
+  boolean GlobalSyncOption;   // No longer used. Was used for ESPeasy values sync between nodes
+  boolean TimerOption;        // Allow to set the "Interval" timer for the plugin.
+  boolean TimerOptional;      // When taskdevice timer is not set and not optional, use default "Interval" delay (Settings.Delay)
+  boolean DecimalsOnly;       // Allow to set the number of decimals (otherwise treated a 0 decimals)
+};
+typedef std::vector<DeviceStruct> DeviceVector;
+DeviceVector Device;
+
+
+/*********************************************************************************************\
+ * ProtocolStruct
+\*********************************************************************************************/
 struct ProtocolStruct
 {
   ProtocolStruct() :
-    Number(0), usesMQTT(false), usesAccount(false), usesPassword(false),
-    defaultPort(0), usesTemplate(false), usesID(false), Custom(false) {}
+    defaultPort(0), Number(0), usesMQTT(false), usesAccount(false), usesPassword(false),
+    usesTemplate(false), usesID(false), Custom(false) {}
+  uint16_t defaultPort;
   byte Number;
   boolean usesMQTT;
   boolean usesAccount;
   boolean usesPassword;
-  int defaultPort;
   boolean usesTemplate;
   boolean usesID;
   boolean Custom;
-} Protocol[CPLUGIN_MAX];
+};
+typedef std::vector<ProtocolStruct> ProtocolVector;
+ProtocolVector Protocol;
 
+
+/*********************************************************************************************\
+ * NotificationStruct
+\*********************************************************************************************/
 struct NotificationStruct
 {
   NotificationStruct() :
@@ -1084,20 +1354,29 @@ struct NotificationStruct
   byte usesGPIO;
 } Notification[NPLUGIN_MAX];
 
+
+/*********************************************************************************************\
+ * NodeStruct
+\*********************************************************************************************/
 struct NodeStruct
 {
   NodeStruct() :
-    age(0), build(0), nodeName(NULL), nodeType(0)
+    build(0), age(0), nodeType(0)
     {
       for (byte i = 0; i < 4; ++i) ip[i] = 0;
     }
+  String nodeName;
   byte ip[4];
-  byte age;
   uint16_t build;
-  char* nodeName;
+  byte age;
   byte nodeType;
-} Nodes[UNIT_MAX];
+};
+typedef std::map<byte, NodeStruct> NodesMap;
+NodesMap Nodes;
 
+/*********************************************************************************************\
+ * systemTimerStruct
+\*********************************************************************************************/
 struct systemTimerStruct
 {
   systemTimerStruct() :
@@ -1111,17 +1390,12 @@ struct systemTimerStruct
   int Par3;
   int Par4;
   int Par5;
-} systemTimers[SYSTEM_TIMER_MAX];
+};
+std::map<unsigned long, systemTimerStruct> systemTimers;
 
-#define NOTAVAILABLE_SYSTEM_TIMER_ERROR "There are no system timer available, max parallel timers are " STR(SYSTEM_TIMER_MAX)
-
-struct systemCMDTimerStruct
-{
-  systemCMDTimerStruct() : timer(0) {}
-  unsigned long timer;
-  String action;
-} systemCMDTimers[SYSTEM_CMD_TIMER_MAX];
-
+/*********************************************************************************************\
+ * pinStatesStruct
+\*********************************************************************************************/
 struct pinStatesStruct
 {
   byte plugin;
@@ -1135,20 +1409,25 @@ struct pinStatesStruct
 #define RTC_BASE_STRUCT 64
 #define RTC_BASE_USERVAR 74
 
+/*********************************************************************************************\
+ * RTCStruct
+\*********************************************************************************************/
 //max 40 bytes: ( 74 - 64 ) * 4
 struct RTCStruct
 {
+  RTCStruct() : ID1(0), ID2(0), unused1(false), factoryResetCounter(0),
+                deepSleepState(0), bootFailedCount(0), flashDayCounter(0),
+                flashCounter(0), bootCounter(0) {}
   byte ID1;
   byte ID2;
   boolean unused1;
   byte factoryResetCounter;
   byte deepSleepState;
-  byte unused2;
+  byte bootFailedCount;
   byte flashDayCounter;
   unsigned long flashCounter;
   unsigned long bootCounter;
 } RTC;
-
 
 int deviceCount = -1;
 int protocolCount = -1;
@@ -1159,19 +1438,19 @@ String printWebString = "";
 boolean printToWebJSON = false;
 
 float UserVar[VARS_PER_TASK * TASKS_MAX];
-struct rulesTiemerStatus
+
+/*********************************************************************************************\
+ * rulesTimerStruct
+\*********************************************************************************************/
+struct rulesTimerStatus
 {
   unsigned long timestamp;
-  unsigned int interval; //interval in millisencond
+  unsigned int interval; //interval in milliseconds
   boolean paused;
 } RulesTimer[RULES_TIMER_MAX];
 
-unsigned long timerSensor[TASKS_MAX];
-unsigned long timer100ms;
-unsigned long timer20ms;
-unsigned long timer1s;
-unsigned long timerwd;
-unsigned long timermqtt;
+msecTimerHandlerStruct msecTimerHandler;
+
 unsigned long timermqtt_interval;
 unsigned long lastSend;
 unsigned long lastWeb;
@@ -1198,7 +1477,18 @@ byte CPlugin_id[CPLUGIN_MAX];
 boolean (*NPlugin_ptr[NPLUGIN_MAX])(byte, struct EventStruct*, String&);
 byte NPlugin_id[NPLUGIN_MAX];
 
-String dummyString = "";
+String dummyString = "";  // FIXME @TD-er  This may take a lot of memory over time, since long-lived Strings only tend to grow.
+
+enum PluginPtrType {
+  TaskPluginEnum,
+  ControllerPluginEnum,
+  NotificationPluginEnum,
+  CommandTimerEnum
+};
+void schedule_event_timer(PluginPtrType ptr_type, byte Index, byte Function, struct EventStruct* event);
+unsigned long createSystemEventMixedId(PluginPtrType ptr_type, byte Index, byte Function);
+unsigned long createSystemEventMixedId(PluginPtrType ptr_type, uint16_t crc16);
+
 
 byte lastBootCause = BOOT_CAUSE_MANUAL_REBOOT;
 
@@ -1295,6 +1585,7 @@ bool processedScanDone = true;
 bool webserver_state = false;
 bool webserver_init = false;
 
+unsigned long idle_msec_per_sec = 0;
 unsigned long elapsed10ps = 0;
 unsigned long elapsed10psU = 0;
 unsigned long elapsed50ps = 0;
@@ -1307,9 +1598,6 @@ unsigned long longestLoop = 0;
 unsigned long loopCounter_full = 1;
 float loop_usec_duration_total = 0.0;
 unsigned long countFindPluginId = 0;
-
-unsigned long systemTimerCalls = 1;
-float systemTimerDurationTotal = 0.0;
 
 unsigned long dailyResetCounter = 0;
 
@@ -1327,8 +1615,9 @@ boolean       UseRTOSMultitasking;
 
 void (*MainLoopCall_ptr)(void);
 
-#include <map>
-
+/*********************************************************************************************\
+ * TimingStats
+\*********************************************************************************************/
 class TimingStats {
     public:
       TimingStats() : _timeTotal(0.0), _count(0), _maxVal(0), _minVal(4294967295) {}
@@ -1445,7 +1734,7 @@ bool mustLogFunction(int function) {
         case PLUGIN_SERIAL_IN:             return true;
         case PLUGIN_UDP_IN:                return true;
         case PLUGIN_CLOCK_IN:              return false;
-        case PLUGIN_TIMER_IN:              return false;
+        case PLUGIN_TIMER_IN:              return true;
         case PLUGIN_FIFTY_PER_SECOND:      return true;
         case PLUGIN_SET_CONFIG:            return false;
         case PLUGIN_GET_DEVICEGPIONAMES:   return false;
@@ -1459,16 +1748,36 @@ bool mustLogFunction(int function) {
 
 std::map<int,TimingStats> pluginStats;
 std::map<int,TimingStats> miscStats;
+unsigned long timediff_calls = 0;
+unsigned long timediff_cpu_cycles_total = 0;
 
-#define LOADFILE_STATS    0
-#define LOOP_STATS        1
-#define PLUGIN_CALL_50PS  2
-#define PLUGIN_CALL_10PS  3
-#define PLUGIN_CALL_10PSU 4
-#define PLUGIN_CALL_1PS   5
-#define CHECK_SENSORS     6
-#define SEND_DATA_STATS   7
+#define LOADFILE_STATS        0
+#define LOOP_STATS            1
+#define PLUGIN_CALL_50PS      2
+#define PLUGIN_CALL_10PS      3
+#define PLUGIN_CALL_10PSU     4
+#define PLUGIN_CALL_1PS       5
+#define SENSOR_SEND_TASK      6
+#define SEND_DATA_STATS       7
 #define COMPUTE_FORMULA_STATS 8
+#define PROC_SYS_TIMER        9
+#define SET_NEW_TIMER        10
+#define TIME_DIFF_COMPUTE    11
+#define MQTT_DELAY_QUEUE     12
+#define C001_DELAY_QUEUE     13
+#define C002_DELAY_QUEUE     14
+#define C003_DELAY_QUEUE     15
+#define C004_DELAY_QUEUE     16
+#define C005_DELAY_QUEUE     17
+#define C006_DELAY_QUEUE     18
+#define C007_DELAY_QUEUE     19
+#define C008_DELAY_QUEUE     20
+#define C009_DELAY_QUEUE     21
+#define C010_DELAY_QUEUE     22
+#define C011_DELAY_QUEUE     23
+#define C012_DELAY_QUEUE     24
+#define C013_DELAY_QUEUE     25
+
 
 
 
@@ -1484,13 +1793,35 @@ String getMiscStatsName(int stat) {
     switch (stat) {
         case LOADFILE_STATS: return F("Load File");
         case LOOP_STATS:     return F("Loop");
-        case PLUGIN_CALL_50PS  : return F("Plugin call 50 p/s  ");
-        case PLUGIN_CALL_10PS  : return F("Plugin call 10 p/s  ");
-        case PLUGIN_CALL_10PSU : return F("Plugin call 10 p/s U");
-        case PLUGIN_CALL_1PS   : return F("Plugin call  1 p/s  ");
-        case CHECK_SENSORS:      return F("checkSensors()      ");
-        case SEND_DATA_STATS:    return F("sendData()          ");
-        case COMPUTE_FORMULA_STATS: return F("Compute formula  ");
+        case PLUGIN_CALL_50PS:      return F("Plugin call 50 p/s  ");
+        case PLUGIN_CALL_10PS:      return F("Plugin call 10 p/s  ");
+        case PLUGIN_CALL_10PSU:     return F("Plugin call 10 p/s U");
+        case PLUGIN_CALL_1PS:       return F("Plugin call  1 p/s  ");
+        case SENSOR_SEND_TASK:      return F("SensorSendTask()    ");
+        case SEND_DATA_STATS:       return F("sendData()          ");
+        case COMPUTE_FORMULA_STATS: return F("Compute formula     ");
+        case PROC_SYS_TIMER:        return F("proc_system_timer() ");
+        case SET_NEW_TIMER:         return F("setNewTimerAt()     ");
+        case TIME_DIFF_COMPUTE:     return F("timeDiff()          ");
+        case MQTT_DELAY_QUEUE:      return F("Delay queue     MQTT");
+        case C001_DELAY_QUEUE:
+        case C002_DELAY_QUEUE:
+        case C003_DELAY_QUEUE:
+        case C004_DELAY_QUEUE:
+        case C005_DELAY_QUEUE:
+        case C006_DELAY_QUEUE:
+        case C007_DELAY_QUEUE:
+        case C008_DELAY_QUEUE:
+        case C009_DELAY_QUEUE:
+        case C010_DELAY_QUEUE:
+        case C011_DELAY_QUEUE:
+        case C012_DELAY_QUEUE:
+        case C013_DELAY_QUEUE:
+        {
+          String result = F("Delay queue     ");
+          result += get_formatted_Controller_number(static_cast<int>(stat - C001_DELAY_QUEUE + 1));
+          return result;
+        }
     }
     return F("Unknown");
 }

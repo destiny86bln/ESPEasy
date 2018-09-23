@@ -287,7 +287,10 @@ boolean Plugin_028(byte function, struct EventStruct *event, String& string)
       {
         const uint8_t i2cAddress = Plugin_028_i2c_addr(event);
         const float tempOffset = Settings.TaskDevicePluginConfig[event->TaskIndex][2] / 10.0;
-        Plugin_028_update_measurements(i2cAddress, tempOffset);
+        if (Plugin_028_update_measurements(i2cAddress, tempOffset, event->TaskIndex)) {
+          // Update was succesfull, schedule a read.
+          schedule_task_device_timer(event->TaskIndex, millis() + 10);
+        }
         break;
       }
 
@@ -312,26 +315,28 @@ boolean Plugin_028(byte function, struct EventStruct *event, String& string)
         } else {
            UserVar[event->BaseVarIndex + 2] = sensor.last_press_val;
         }
-        String log;
-        log.reserve(40); // Prevent re-allocation
-        log = sensor.getDeviceName();
-        log += F(" : Address: 0x");
-        log += String(i2cAddress,HEX);
-        addLog(LOG_LEVEL_INFO, log);
-        log = sensor.getDeviceName();
-        log += F(" : Temperature: ");
-        log += UserVar[event->BaseVarIndex];
-        addLog(LOG_LEVEL_INFO, log);
-        if (sensor.hasHumidity()) {
+        if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+          String log;
+          log.reserve(40); // Prevent re-allocation
           log = sensor.getDeviceName();
-          log += F(" : Humidity: ");
-          log += UserVar[event->BaseVarIndex + 1];
+          log += F(" : Address: 0x");
+          log += String(i2cAddress,HEX);
+          addLog(LOG_LEVEL_INFO, log);
+          log = sensor.getDeviceName();
+          log += F(" : Temperature: ");
+          log += UserVar[event->BaseVarIndex];
+          addLog(LOG_LEVEL_INFO, log);
+          if (sensor.hasHumidity()) {
+            log = sensor.getDeviceName();
+            log += F(" : Humidity: ");
+            log += UserVar[event->BaseVarIndex + 1];
+            addLog(LOG_LEVEL_INFO, log);
+          }
+          log = sensor.getDeviceName();
+          log += F(" : Barometric Pressure: ");
+          log += UserVar[event->BaseVarIndex + 2];
           addLog(LOG_LEVEL_INFO, log);
         }
-        log = sensor.getDeviceName();
-        log += F(" : Barometric Pressure: ");
-        log += UserVar[event->BaseVarIndex + 2];
-        addLog(LOG_LEVEL_INFO, log);
         success = true;
         break;
       }
@@ -347,7 +352,7 @@ boolean Plugin_028(byte function, struct EventStruct *event, String& string)
 
 
 // Only perform the measurements with big interval to prevent the sensor from warming up.
-bool Plugin_028_update_measurements(const uint8_t i2cAddress, float tempOffset) {
+bool Plugin_028_update_measurements(const uint8_t i2cAddress, float tempOffset, unsigned long task_index) {
   P028_sensordata& sensor = P028_sensors[i2cAddress];
   const unsigned long current_time = millis();
   Plugin_028_check(i2cAddress); // Check id device is present
@@ -360,7 +365,7 @@ bool Plugin_028_update_measurements(const uint8_t i2cAddress, float tempOffset) 
   }
   if (sensor.state != BMx_Wait_for_samples) {
     if (sensor.last_measurement != 0 &&
-        !timeOutReached(sensor.last_measurement + (Settings.MessageDelay * 1000))) {
+        !timeOutReached(sensor.last_measurement + (Settings.TaskDeviceTimer[task_index] * 1000))) {
       // Timeout has not yet been reached.
       return false;
     }
@@ -377,8 +382,10 @@ bool Plugin_028_update_measurements(const uint8_t i2cAddress, float tempOffset) 
     return false;
   }
 
-  if (!timeOutReached(sensor.last_measurement + 1000)) {
-    // Must wait one second to make sure the filtered values stabilize.
+  // It takes at least 1.587 sec for valit measurements to complete.
+  // The datasheet names this the "T63" moment.
+  // 1 second = 63% of the time needed to perform a measurement.
+  if (!timeOutReached(sensor.last_measurement + 1587)) {
     return false;
   }
   if (!Plugin_028_readUncompensatedData(i2cAddress)) {
@@ -395,9 +402,11 @@ bool Plugin_028_update_measurements(const uint8_t i2cAddress, float tempOffset) 
 
 
   String log;
-  log.reserve(120); // Prevent re-allocation
-  log = sensor.getDeviceName();
-  log += F(":");
+  if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+    log.reserve(120); // Prevent re-allocation
+    log = sensor.getDeviceName();
+    log += F(":");
+  }
   boolean logAdded = false;
   if (sensor.hasHumidity()) {
     // Apply half of the temp offset, to correct the dew point offset.
@@ -409,34 +418,46 @@ bool Plugin_028_update_measurements(const uint8_t i2cAddress, float tempOffset) 
   }
   if (tempOffset > 0.1 || tempOffset < -0.1) {
     // There is some offset to apply.
-    log += F(" Apply temp offset ");
-    log += tempOffset;
-    log += F("C");
+    if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+      log += F(" Apply temp offset ");
+      log += tempOffset;
+      log += F("C");
+    }
     if (sensor.hasHumidity()) {
-      log += F(" humidity ");
-      log += sensor.last_hum_val;
+      if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+        log += F(" humidity ");
+        log += sensor.last_hum_val;
+      }
       sensor.last_hum_val = compute_humidity_from_dewpoint(sensor.last_temp_val + tempOffset, sensor.last_dew_temp_val);
-      log += F("% => ");
-      log += sensor.last_hum_val;
-      log += F("%");
+      if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+        log += F("% => ");
+        log += sensor.last_hum_val;
+        log += F("%");
+      }
     } else {
       sensor.last_hum_val = 0.0;
     }
-    log += F(" temperature ");
-    log += sensor.last_temp_val;
+    if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+      log += F(" temperature ");
+      log += sensor.last_temp_val;
+    }
     sensor.last_temp_val = sensor.last_temp_val + tempOffset;
-    log += F("C => ");
-    log += sensor.last_temp_val;
-    log += F("C");
-    logAdded = true;
+    if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+      log += F("C => ");
+      log += sensor.last_temp_val;
+      log += F("C");
+      logAdded = true;
+    }
   }
   if (sensor.hasHumidity()) {
-    log += F(" dew point ");
-    log += sensor.last_dew_temp_val;
-    log += F("C");
-    logAdded = true;
+    if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+      log += F(" dew point ");
+      log += sensor.last_dew_temp_val;
+      log += F("C");
+      logAdded = true;
+    }
   }
-  if (logAdded)
+  if (logAdded && loglevelActiveFor(LOG_LEVEL_INFO))
     addLog(LOG_LEVEL_INFO, log);
   return true;
 }
@@ -491,7 +512,7 @@ bool Plugin_028_begin(uint8_t i2cAddress) {
   I2C_write8_reg(i2cAddress, BMx280_REGISTER_SOFTRESET, 0xB6);
   delay(2);  // Startup time is 2 ms (datasheet)
   Plugin_028_readCoefficients(i2cAddress);
-  delay(65); //May be needed here as well to fix first wrong measurement?
+//  delay(65); //May be needed here as well to fix first wrong measurement?
   return true;
 }
 
@@ -529,8 +550,8 @@ void Plugin_028_readCoefficients(uint8_t i2cAddress)
 bool Plugin_028_readUncompensatedData(uint8_t i2cAddress) {
   // wait until measurement has been completed, otherwise we would read
   // the values from the last measurement
-  while (I2C_read8_reg(i2cAddress, BMx280_REGISTER_STATUS) & 0x08)
-    delay(1);
+  if (I2C_read8_reg(i2cAddress, BMx280_REGISTER_STATUS) & 0x08)
+    return false;
 
   I2Cdata_bytes BME280_data(BME280_P_T_H_DATA_LEN, BME280_DATA_ADDR);
   bool allDataRead = I2C_read_bytes(i2cAddress, BME280_data);
@@ -622,13 +643,6 @@ float Plugin_028_readHumidity(uint8_t i2cAddress)
   if (!sensor.hasHumidity()) {
     // No support for humidity
     return 0.0;
-  }
-  // It takes at least 1.587 sec for valit measurements to complete.
-  // The datasheet names this the "T63" moment.
-  // 1 second = 63% of the time needed to perform a measurement.
-  unsigned long difTime = millis() - sensor.last_measurement;
-  if (difTime < 1587) {
-    delay(1587 - difTime);
   }
   int32_t adc_H = sensor.uncompensated.humidity;
 
