@@ -126,10 +126,10 @@ public:
     return total;
   }
 
+  String txt[VARS_PER_TASK];
   int controller_idx;
   byte TaskIndex;
   int idx;
-  String txt[VARS_PER_TASK];
   mutable byte valuesSent;  // Value must be set by const function checkDone()
   byte valueCount;
 };
@@ -146,18 +146,28 @@ public:
 \*********************************************************************************************/
 class C009_queue_element {
 public:
-  C009_queue_element() : controller_idx(0) {}
-  C009_queue_element(int ctrl_idx, const String& URI, const String& JSON) :
-     controller_idx(ctrl_idx), url(URI), json(JSON) {}
+  C009_queue_element() : controller_idx(0), TaskIndex(0), idx(0), sensorType(0) {}
+  C009_queue_element(const struct EventStruct* event) :
+    controller_idx(event->ControllerIndex),
+    TaskIndex(event->TaskIndex),
+    idx(event->idx),
+    sensorType(event->sensorType) {}
 
   size_t getSize() const {
-    return sizeof(this) + url.length() + json.length();
+    size_t total = sizeof(this);
+    for (int i = 0; i < VARS_PER_TASK; ++i) {
+      total += txt[i].length();
+    }
+    return total;
   }
 
+  String txt[VARS_PER_TASK];
   int controller_idx;
-  String url;
-  String json;
+  byte TaskIndex;
+  int idx;
+  byte sensorType;
 };
+
 
 /*********************************************************************************************\
  * C010_queue_element for queueing requests for 010: Generic UDP
@@ -189,13 +199,15 @@ struct ControllerDelayHandlerStruct {
       max_queue_depth(CONTROLLER_DELAY_QUEUE_DEPTH_DFLT),
       attempt(0),
       max_retries(CONTROLLER_DELAY_QUEUE_RETRY_DFLT),
-      delete_oldest(false) {}
+      delete_oldest(false),
+      must_check_reply(false) {}
 
   void configureControllerSettings(const ControllerSettingsStruct& settings) {
     minTimeBetweenMessages = settings.MinimalTimeBetweenMessages;
     max_queue_depth = settings.MaxQueueDepth;
     max_retries = settings.MaxRetry;
     delete_oldest = settings.DeleteOldest;
+    must_check_reply = settings.MustCheckReply;
     // Set some sound limits when not configured
     if (max_queue_depth == 0) max_queue_depth = CONTROLLER_DELAY_QUEUE_DEPTH_DFLT;
     if (max_retries == 0) max_retries = CONTROLLER_DELAY_QUEUE_RETRY_DFLT;
@@ -251,15 +263,14 @@ struct ControllerDelayHandlerStruct {
 
   // Get the next element.
   // Remove front element when max_retries is reached.
-  bool getNext(T& element) {
-    if (sendQueue.empty()) return false;
+  T* getNext() {
+    if (sendQueue.empty()) return NULL;
     if (attempt > max_retries) {
       sendQueue.pop_front();
       attempt = 0;
-      if (sendQueue.empty()) return false;
+      if (sendQueue.empty()) return NULL;
     }
-    element = sendQueue.front();
-    return true;
+    return &sendQueue.front();
   }
 
   // Mark as processed and return time to schedule for next process.
@@ -302,6 +313,7 @@ struct ControllerDelayHandlerStruct {
   byte attempt;
   byte max_retries;
   bool delete_oldest;
+  bool must_check_reply;
 };
 
 ControllerDelayHandlerStruct<MQTT_queue_element> MQTTDelayHandler;
@@ -321,17 +333,17 @@ ControllerDelayHandlerStruct<MQTT_queue_element> MQTTDelayHandler;
                 ControllerDelayHandlerStruct<C##NNN##_queue_element> C##NNN##_DelayHandler; \
                 bool do_process_c##NNN##_delay_queue(int controller_number, const C##NNN##_queue_element& element, ControllerSettingsStruct& ControllerSettings); \
                 void process_c##NNN##_delay_queue() { \
-                  C##NNN##_queue_element element; \
-                  if (!C##NNN##_DelayHandler.getNext(element)) return; \
-                  ControllerSettingsStruct ControllerSettings; \
-                  LoadControllerSettings(element.controller_idx, ControllerSettings); \
+                  C##NNN##_queue_element* element(C##NNN##_DelayHandler.getNext()); \
+                  if (element == NULL) return; \
+                  MakeControllerSettings(ControllerSettings); \
+                  LoadControllerSettings(element->controller_idx, ControllerSettings); \
                   C##NNN##_DelayHandler.configureControllerSettings(ControllerSettings); \
                   if (!WiFiConnected(100)) { \
                     scheduleNextDelayQueue(TIMER_C##NNN##_DELAY_QUEUE, C##NNN##_DelayHandler.getNextScheduleTime()); \
                     return; \
                   } \
                   START_TIMER; \
-                  C##NNN##_DelayHandler.markProcessed(do_process_c##NNN##_delay_queue(M, element, ControllerSettings)); \
+                  C##NNN##_DelayHandler.markProcessed(do_process_c##NNN##_delay_queue(M, *element, ControllerSettings)); \
                   STOP_TIMER(C##NNN##_DELAY_QUEUE); \
                   scheduleNextDelayQueue(TIMER_C##NNN##_DELAY_QUEUE, C##NNN##_DelayHandler.getNextScheduleTime()); \
                 }
@@ -382,33 +394,37 @@ bool safeReadStringUntil(Stream &input, String &str, char terminator, unsigned i
 	int c;
   const unsigned long start = millis();
 	const unsigned long timer = start + timeout;
-  unsigned long backgroundtasks_timer = start + 100;
+  unsigned long backgroundtasks_timer = start + 10;
 	str = "";
 
 	do {
 		//read character
-		c = input.read();
-		if (c >= 0) {
-			//found terminator, we're ok
-			if (c == terminator) {
-				return(true);
-			}
-			//found character, add to string
-			else{
-				str += char(c);
-				//string at max size?
-				if (str.length() >= maxSize) {
-					addLog(LOG_LEVEL_ERROR, F("Not enough bufferspace to read all input data!"));
-					return(false);
-				}
-			}
-		}
-    // We must run the backgroundtasks every now and then.
-    if (timeOutReached(backgroundtasks_timer)) {
-      backgroundtasks_timer += 100;
-      backgroundtasks();
+    if (input.available()) {
+  		c = input.read();
+  		if (c >= 0) {
+  			//found terminator, we're ok
+  			if (c == terminator) {
+  				return(true);
+  			}
+  			//found character, add to string
+  			else{
+  				str += char(c);
+  				//string at max size?
+  				if (str.length() >= maxSize) {
+  					addLog(LOG_LEVEL_ERROR, F("Not enough bufferspace to read all input data!"));
+  					return(false);
+  				}
+  			}
+  		}
+      // We must run the backgroundtasks every now and then.
+      if (timeOutReached(backgroundtasks_timer)) {
+        backgroundtasks_timer += 10;
+        backgroundtasks();
+      } else {
+        delay(0);
+      }
     } else {
-      yield();
+      delay(0);
     }
 	} while (!timeOutReached(timer));
 
@@ -464,7 +480,7 @@ String get_user_agent_request_header_field() {
   request += String(CRCValues.compileDate);
   request += ' ';
   request += String(CRCValues.compileTime);
-  request += F("\r\n");
+  request += "\r\n";
   agent_size = request.length();
   return request;
 }
@@ -485,20 +501,21 @@ String do_create_http_request(
   request += ' ';
   if (!uri.startsWith("/")) request += '/';
   request += uri;
-  request += F(" HTTP/1.1\r\n");
+  request += F(" HTTP/1.1");
+  request += "\r\n";
   if (content_length >= 0) {
     request += F("Content-Length: ");
     request += content_length;
-    request += F("\r\n");
+    request += "\r\n";
   }
   request += F("Host: ");
   request += hostportString;
-  request += F("\r\n");
+  request += "\r\n";
   request += auth_header;
   request += additional_options;
   request += get_user_agent_request_header_field();
   request += F("Connection: close\r\n");
-  request += F("\r\n");
+  request += "\r\n";
   addLog(LOG_LEVEL_DEBUG, request);
   return request;
 }
@@ -584,72 +601,113 @@ bool count_connection_results(bool success, const String& prefix, int controller
 }
 
 bool try_connect_host(int controller_number, WiFiUDP& client, ControllerSettingsStruct& ControllerSettings) {
+  START_TIMER;
+  client.setTimeout(ControllerSettings.ClientTimeout);
   log_connecting_to(F("UDP  : "), controller_number, ControllerSettings);
   bool success = ControllerSettings.beginPacket(client) != 0;
-  return count_connection_results(
+  const bool result = count_connection_results(
       success,
       F("UDP  : "), controller_number, ControllerSettings);
+  STOP_TIMER(TRY_CONNECT_HOST_UDP);
+  return result;
 }
 
 bool try_connect_host(int controller_number, WiFiClient& client, ControllerSettingsStruct& ControllerSettings) {
+  START_TIMER;
   // Use WiFiClient class to create TCP connections
+  client.setTimeout(ControllerSettings.ClientTimeout);
   log_connecting_to(F("HTTP : "), controller_number, ControllerSettings);
   bool success = ControllerSettings.connectToHost(client);
-  return count_connection_results(
+  const bool result = count_connection_results(
       success,
       F("HTTP : "), controller_number, ControllerSettings);
+  STOP_TIMER(TRY_CONNECT_HOST_TCP);
+  return result;
 }
 
 // Use "client.available() || client.connected()" to read all lines from slow servers.
 // See: https://github.com/esp8266/Arduino/pull/5113
 //      https://github.com/esp8266/Arduino/pull/1829
 bool client_available(WiFiClient& client) {
+  delay(0);
   return client.available() || client.connected();
 }
 
-bool send_via_http(const String& logIdentifier, WiFiClient& client, const String& postStr) {
-  bool success = false;
+bool send_via_http(const String& logIdentifier, WiFiClient& client, const String& postStr, bool must_check_reply) {
+  bool success = !must_check_reply;
   // This will send the request to the server
-  client.print(postStr);
-
-  unsigned long timer = millis() + 200;
-  while (!client.available() && !timeOutReached(timer))
-    delay(1);
-
-  // Read all the lines of the reply from server and print them to Serial
-  while (client_available(client) && !success) {
-    //   String line = client.readStringUntil('\n');
-    String line;
-    safeReadStringUntil(client, line, '\n');
-
-    if (loglevelActiveFor(LOG_LEVEL_DEBUG_MORE)) {
-      if (line.length() > 80) {
-        addLog(LOG_LEVEL_DEBUG_MORE, line.substring(0, 80));
-      } else {
-        addLog(LOG_LEVEL_DEBUG_MORE, line);
-      }
+  byte written = client.print(postStr);
+  // as of 2018/11/01 the print function only returns one byte (upd to 256 chars sent). However if the string sent can be longer than this therefore we calculate modulo 256.
+  // see discussion here https://github.com/letscontrolit/ESPEasy/pull/1979
+  // and implementation here https://github.com/esp8266/Arduino/blob/561426c0c77e9d05708f2c4bf2a956d3552a3706/libraries/ESP8266WiFi/src/include/ClientContext.h#L437-L467
+  // this needs to be adjusted if the WiFiClient.print method changes.
+  if (written != (postStr.length()%256)) {
+    if (loglevelActiveFor(LOG_LEVEL_ERROR)) {
+      String log = F("HTTP : ");
+      log += logIdentifier;
+      log += F(" Error: could not write to client (");
+      log += written;
+      log += "/";
+      log += postStr.length();
+      log += ")";
+      addLog(LOG_LEVEL_ERROR, log);
     }
-    if (line.startsWith(F("HTTP/1.1 2")))
-    {
-      success = true;
-      if (loglevelActiveFor(LOG_LEVEL_DEBUG)) {
-        String log = F("HTTP : ");
-        log += logIdentifier;
-        log += F(" Success! ");
-        log += line;
-        addLog(LOG_LEVEL_DEBUG, log);
-      }
-    } else if (line.startsWith(F("HTTP/1.1 4"))) {
-      if (loglevelActiveFor(LOG_LEVEL_ERROR)) {
-        String log = F("HTTP : ");
-        log += logIdentifier;
-        log += F(" Error: ");
-        log += line;
-        addLog(LOG_LEVEL_ERROR, log);
-      }
-      addLog(LOG_LEVEL_DEBUG_MORE, postStr);
+    success = false;
+  } else {
+    if (loglevelActiveFor(LOG_LEVEL_DEBUG)) {
+      String log = F("HTTP : ");
+      log += logIdentifier;
+      log += F(" written to client (");
+      log += written;
+      log += "/";
+      log += postStr.length();
+      log += ")";
+      addLog(LOG_LEVEL_DEBUG, log);
     }
-    yield();
+  }
+
+  if (must_check_reply) {
+    unsigned long timer = millis() + 200;
+    while (!client_available(client)) {
+      if (timeOutReached(timer)) return false;
+      delay(1);
+    }
+
+    // Read all the lines of the reply from server and print them to Serial
+    while (client_available(client) && !success) {
+      //   String line = client.readStringUntil('\n');
+      String line;
+      safeReadStringUntil(client, line, '\n');
+
+      if (loglevelActiveFor(LOG_LEVEL_DEBUG_MORE)) {
+        if (line.length() > 80) {
+          addLog(LOG_LEVEL_DEBUG_MORE, line.substring(0, 80));
+        } else {
+          addLog(LOG_LEVEL_DEBUG_MORE, line);
+        }
+      }
+      if (line.startsWith(F("HTTP/1.1 2")))
+      {
+        success = true;
+        if (loglevelActiveFor(LOG_LEVEL_DEBUG)) {
+          String log = F("HTTP : ");
+          log += logIdentifier;
+          log += F(" Success! ");
+          log += line;
+          addLog(LOG_LEVEL_DEBUG, log);
+        }
+      } else if (line.startsWith(F("HTTP/1.1 4"))) {
+        if (loglevelActiveFor(LOG_LEVEL_ERROR)) {
+          String log = F("HTTP : ");
+          log += logIdentifier;
+          log += F(" Error: ");
+          log += line;
+          addLog(LOG_LEVEL_ERROR, log);
+        }
+        addLog(LOG_LEVEL_DEBUG_MORE, postStr);
+      }
+      delay(0);
+    }
   }
   if (loglevelActiveFor(LOG_LEVEL_DEBUG)) {
     String log = F("HTTP : ");
@@ -663,8 +721,8 @@ bool send_via_http(const String& logIdentifier, WiFiClient& client, const String
   return success;
 }
 
-bool send_via_http(int controller_number, WiFiClient& client, const String& postStr) {
-  return send_via_http(get_formatted_Controller_number(controller_number), client, postStr);
+bool send_via_http(int controller_number, WiFiClient& client, const String& postStr, bool must_check_reply) {
+  return send_via_http(get_formatted_Controller_number(controller_number), client, postStr, must_check_reply);
 }
 
 

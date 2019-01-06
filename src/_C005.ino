@@ -7,9 +7,9 @@
 #define CPLUGIN_ID_005         5
 #define CPLUGIN_NAME_005       "OpenHAB MQTT"
 
-boolean CPlugin_005(byte function, struct EventStruct *event, String& string)
+bool CPlugin_005(byte function, struct EventStruct *event, String& string)
 {
-  boolean success = false;
+  bool success = false;
 
   switch (function)
   {
@@ -33,7 +33,7 @@ boolean CPlugin_005(byte function, struct EventStruct *event, String& string)
 
     case CPLUGIN_INIT:
       {
-        ControllerSettingsStruct ControllerSettings;
+        MakeControllerSettings(ControllerSettings);
         LoadControllerSettings(event->ControllerIndex, ControllerSettings);
         MQTTDelayHandler.configureControllerSettings(ControllerSettings);
         break;
@@ -92,7 +92,7 @@ boolean CPlugin_005(byte function, struct EventStruct *event, String& string)
 
     case CPLUGIN_PROTOCOL_SEND:
       {
-        ControllerSettingsStruct ControllerSettings;
+        MakeControllerSettings(ControllerSettings);
         LoadControllerSettings(event->ControllerIndex, ControllerSettings);
         if (!ControllerSettings.checkHostReachable(true)) {
             success = false;
@@ -100,7 +100,7 @@ boolean CPlugin_005(byte function, struct EventStruct *event, String& string)
         }
         statusLED(true);
 
-        if (ExtraTaskSettings.TaskDeviceValueNames[0][0] == 0)
+        if (ExtraTaskSettings.TaskIndex != event->TaskIndex)
           PluginCall(PLUGIN_GET_DEVICEVALUENAMES, event, dummyString);
 
         String pubname = ControllerSettings.Publish;
@@ -118,7 +118,7 @@ boolean CPlugin_005(byte function, struct EventStruct *event, String& string)
           MQTTpublish(event->ControllerIndex, tmppubname.c_str(), value.c_str(), Settings.MQTTRetainFlag);
           String log = F("MQTT : ");
           log += tmppubname;
-          log += " ";
+          log += ' ';
           log += value;
           addLog(LOG_LEVEL_DEBUG, log);
         }

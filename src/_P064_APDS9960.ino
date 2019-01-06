@@ -141,9 +141,9 @@ boolean Plugin_064(byte function, struct EventStruct *event, String& string)
 
         //int gesture = PLUGIN_064_pds->readGestureNonBlocking();
 
-        //if (gesture == -1) Serial.print(".");
-        //if (gesture == -2) Serial.print(":");
-        //if (gesture == -3) Serial.print("|");
+        //if (gesture == -1) serialPrint(".");
+        //if (gesture == -2) serialPrint(":");
+        //if (gesture == -3) serialPrint("|");
 
         //if ( 0 && PLUGIN_064_pds->isGestureAvailable() )
         if (gesture >= 0)
@@ -160,9 +160,9 @@ boolean Plugin_064(byte function, struct EventStruct *event, String& string)
             case DIR_FAR:     log += F("FAR");     break;
             default:          log += F("NONE");    break;
           }
-          log += F(" (");
+          log += " (";
           log += gesture;
-          log += F(")");
+          log += ')';
 
           UserVar[event->BaseVarIndex] = (float)gesture;
           event->sensorType = SENSOR_TYPE_SWITCH;

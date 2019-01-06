@@ -1,4 +1,6 @@
 
+#include <Arduino.h>
+
 #ifdef CONTINUOUS_INTEGRATION
 #pragma GCC diagnostic error "-Wall"
 #else
@@ -106,9 +108,14 @@ int firstEnabledBlynkController() {
 \*********************************************************************************************/
 void setup()
 {
+#ifdef ESP8266_DISABLE_EXTRA4K
+  disable_extra4k_at_link_time();
+#endif
   WiFi.persistent(false); // Do not use SDK storage of SSID/WPA parameters
   WiFi.setAutoReconnect(false);
   setWifiMode(WIFI_OFF);
+  lowestFreeStack = getFreeStackWatermark();
+  lowestRAM = FreeMem();
 
   Plugin_id.resize(PLUGIN_MAX);
   Task_id_to_Plugin_id.resize(TASKS_MAX);
@@ -119,10 +126,8 @@ void setup()
       ledChannelPin[x] = -1;
   #endif
 
-  lowestRAM = FreeMem();
-
   Serial.begin(115200);
-  // Serial.print("\n\n\nBOOOTTT\n\n\n");
+  // serialPrint("\n\n\nBOOOTTT\n\n\n");
 
   initLog();
 
@@ -139,7 +144,7 @@ void setup()
 
   if (SpiffsSectors() < 32)
   {
-    Serial.println(F("\nNo (or too small) SPIFFS area..\nSystem Halted\nPlease reflash with 128k SPIFFS minimum!"));
+    serialPrintln(F("\nNo (or too small) SPIFFS area..\nSystem Halted\nPlease reflash with 128k SPIFFS minimum!"));
     while (true)
       delay(1);
   }
@@ -148,11 +153,10 @@ void setup()
 
   String log = F("\n\n\rINIT : Booting version: ");
   log += BUILD_GIT;
-  log += F(" (");
+  log += " (";
   log += getSystemLibraryString();
-  log += F(")");
+  log += ')';
   addLog(LOG_LEVEL_INFO, log);
-
 
 
   //warm boot
@@ -194,6 +198,7 @@ void setup()
   fileSystemCheck();
   progMemMD5check();
   LoadSettings();
+  Settings.UseRTOSMultitasking = false; // For now, disable it, we experience heap corruption.
   if (RTC.bootFailedCount > 10 && RTC.bootCounter > 10) {
     byte toDisable = RTC.bootFailedCount - 10;
     toDisable = disablePlugin(toDisable);
@@ -213,11 +218,11 @@ void setup()
   if (Settings.Version != VERSION || Settings.PID != ESP_PROJECT_PID)
   {
     // Direct Serial is allowed here, since this is only an emergency task.
-    Serial.print(F("\nPID:"));
-    Serial.println(Settings.PID);
-    Serial.print(F("Version:"));
-    Serial.println(Settings.Version);
-    Serial.println(F("INIT : Incorrect PID or version!"));
+    serialPrint(F("\nPID:"));
+    serialPrintln(String(Settings.PID));
+    serialPrint(F("Version:"));
+    serialPrintln(String(Settings.Version));
+    serialPrintln(F("INIT : Incorrect PID or version!"));
     delay(1000);
     ResetFactory();
   }
@@ -246,6 +251,12 @@ void setup()
 
   timermqtt_interval = 250; // Interval for checking MQTT
   timerAwakeFromDeepSleep = millis();
+  if (Settings.UseRules && isDeepSleepEnabled())
+  {
+    String event = F("System#NoSleep=");
+    event += Settings.deepSleep;
+    rulesProcessing(event);
+  }
 
   PluginInit();
   CPluginInit();
@@ -253,9 +264,9 @@ void setup()
   log = F("INFO : Plugins: ");
   log += deviceCount + 1;
   log += getPluginDescriptionString();
-  log += F(" (");
+  log += " (";
   log += getSystemLibraryString();
-  log += F(")");
+  log += ')';
   addLog(LOG_LEVEL_INFO, log);
 
   if (deviceCount + 1 >= PLUGIN_MAX) {
@@ -315,9 +326,17 @@ void setup()
     if(UseRTOSMultitasking){
       log = F("RTOS : Launching tasks");
       addLog(LOG_LEVEL_INFO, log);
-      xTaskCreatePinnedToCore(RTOS_TaskServers, "RTOS_TaskServers", 8192, NULL, 1, NULL, 1);
+      xTaskCreatePinnedToCore(RTOS_TaskServers, "RTOS_TaskServers", 16384, NULL, 1, NULL, 1);
       xTaskCreatePinnedToCore(RTOS_TaskSerial, "RTOS_TaskSerial", 8192, NULL, 1, NULL, 1);
       xTaskCreatePinnedToCore(RTOS_Task10ps, "RTOS_Task10ps", 8192, NULL, 1, NULL, 1);
+      xTaskCreatePinnedToCore(
+                    RTOS_HandleSchedule,   /* Function to implement the task */
+                    "RTOS_HandleSchedule", /* Name of the task */
+                    16384,      /* Stack size in words */
+                    NULL,       /* Task input parameter */
+                    1,          /* Priority of the task */
+                    NULL,       /* Task handle. */
+                    1);         /* Core where the task should run */
     }
   #endif
 
@@ -364,6 +383,14 @@ void RTOS_Task10ps( void * parameter )
     run10TimesPerSecond();
  }
 }
+
+void RTOS_HandleSchedule( void * parameter )
+{
+ while (true){
+    handle_schedule();
+ }
+}
+
 #endif
 
 int firstEnabledMQTTController() {
@@ -379,7 +406,7 @@ int firstEnabledMQTTController() {
 bool getControllerProtocolDisplayName(byte ProtocolIndex, byte parameterIdx, String& protoDisplayName) {
   EventStruct tmpEvent;
   tmpEvent.idx=parameterIdx;
-  return CPlugin_ptr[ProtocolIndex](CPLUGIN_GET_PROTOCOL_DISPLAY_NAME, &tmpEvent, protoDisplayName);
+  return CPluginCall(ProtocolIndex, CPLUGIN_GET_PROTOCOL_DISPLAY_NAME, &tmpEvent, protoDisplayName);
 }
 
 void updateLoopStats() {
@@ -390,6 +417,8 @@ void updateLoopStats() {
     return;
   }
   const long usecSince = usecPassedSince(lastLoopStart);
+  miscStats[LOOP_STATS].add(usecSince);
+
   loop_usec_duration_total += usecSince;
   lastLoopStart = micros();
   if (usecSince <= 0 || usecSince > 10000000)
@@ -446,8 +475,11 @@ int getLoopCountPerSec() {
 \*********************************************************************************************/
 void loop()
 {
+  /*
+  //FIXME TD-er: No idea what this does.
   if(MainLoopCall_ptr)
       MainLoopCall_ptr();
+  */
 
   updateLoopStats();
 
@@ -457,7 +489,10 @@ void loop()
     WiFiConnectRelaxed();
     wifiSetupConnect = false;
   }
-  if (wifiStatus != ESPEASY_WIFI_SERVICES_INITIALIZED) {
+  if (wifiStatus != ESPEASY_WIFI_SERVICES_INITIALIZED || unprocessedWifiEvents()) {
+    // WiFi connection is not yet available, so introduce some extra delays to
+    // help the background tasks managing wifi connections
+    delay(1);
     if (wifiStatus >= ESPEASY_WIFI_CONNECTED) processConnect();
     if (wifiStatus >= ESPEASY_WIFI_GOT_IP) processGotIP();
     if (wifiStatus == ESPEASY_WIFI_DISCONNECTED) processDisconnect();
@@ -476,6 +511,13 @@ void loop()
      firstLoop = false;
      timerAwakeFromDeepSleep = millis(); // Allow to run for "awake" number of seconds, now we have wifi.
      // schedule_all_task_device_timers(); Disabled for now, since we are now using queues for controllers.
+     if (Settings.UseRules && isDeepSleepEnabled())
+     {
+        String event = F("System#NoSleep=");
+        event += Settings.deepSleep;
+        rulesProcessing(event);
+     }
+
 
      RTC.bootFailedCount = 0;
      saveToRTC();
@@ -494,7 +536,10 @@ void loop()
   //normal mode, run each task when its time
   else
   {
-    handle_schedule();
+    if (!UseRTOSMultitasking) {
+      // On ESP32 the schedule is executed on the 2nd core.
+      handle_schedule();
+    }
   }
 
   backgroundtasks();
@@ -507,6 +552,7 @@ void loop()
     }
     // Flush outstanding MQTT messages
     runPeriodicalMQTT();
+    flushAndDisconnectAllClients();
 
     deepSleep(Settings.Delay);
     //deepsleep will never return, its a special kind of reboot
@@ -520,6 +566,14 @@ bool checkConnectionsEstablished() {
     return MQTTclient_connected;
   }
   return true;
+}
+
+void flushAndDisconnectAllClients() {
+  if (MQTTclient.connected()) {
+    MQTTclient.disconnect();
+    updateMQTTclient_connected();
+  }
+  /// FIXME TD-er: add call to all controllers (delay queue) to flush all data.
 }
 
 void runPeriodicalMQTT() {
@@ -610,7 +664,8 @@ void run10TimesPerSecond() {
   }
   {
     START_TIMER;
-    PluginCall(PLUGIN_UNCONDITIONAL_POLL, 0, dummyString);
+//    PluginCall(PLUGIN_UNCONDITIONAL_POLL, 0, dummyString);
+    PluginCall(PLUGIN_MONITOR, 0, dummyString);
     STOP_TIMER(PLUGIN_CALL_10PSU);
   }
   if (Settings.UseRules && eventBuffer.length() > 0)
@@ -637,8 +692,7 @@ void runOncePerSecond()
     RTC.flashDayCounter=0;
     saveToRTC();
     dailyResetCounter=0;
-    String log = F("SYS  : Reset 24h counters");
-    addLog(LOG_LEVEL_INFO, log);
+    addLog(LOG_LEVEL_INFO, F("SYS  : Reset 24h counters"));
   }
 
   if (Settings.ConnectionFailuresThreshold)
@@ -656,12 +710,7 @@ void runOncePerSecond()
         }
       case CMD_REBOOT:
         {
-          #if defined(ESP8266)
-            ESP.reset();
-          #endif
-          #if defined(ESP32)
-            ESP.restart();
-          #endif
+          reboot();
           break;
         }
     }
@@ -700,15 +749,15 @@ void runOncePerSecond()
 /*
   if (Settings.SerialLogLevel == LOG_LEVEL_DEBUG_DEV)
   {
-    Serial.print(F("Plugin calls: 50 ps:"));
-    Serial.print(elapsed50ps);
-    Serial.print(F(" uS, 10 ps:"));
-    Serial.print(elapsed10ps);
-    Serial.print(F(" uS, 10 psU:"));
-    Serial.print(elapsed10psU);
-    Serial.print(F(" uS, 1 ps:"));
-    Serial.print(elapsed);
-    Serial.println(F(" uS"));
+    serialPrint(F("Plugin calls: 50 ps:"));
+    serialPrint(elapsed50ps);
+    serialPrint(F(" uS, 10 ps:"));
+    serialPrint(elapsed10ps);
+    serialPrint(F(" uS, 10 psU:"));
+    serialPrint(elapsed10psU);
+    serialPrint(F(" uS, 1 ps:"));
+    serialPrint(elapsed);
+    serialPrintln(F(" uS"));
     elapsed50ps=0;
     elapsed10ps=0;
     elapsed10psU=0;
@@ -721,7 +770,7 @@ void runOncePerSecond()
 void logTimerStatistics() {
   byte loglevel = LOG_LEVEL_DEBUG;
   updateLoopStats_30sec(loglevel);
-  logStatistics(loglevel, true);
+//  logStatistics(loglevel, true);
   if (loglevelActiveFor(loglevel)) {
     String queueLog = F("Scheduler stats: (called/tasks/max_length/idle%) ");
     queueLog += msecTimerHandler.getQueueStats();
@@ -788,7 +837,7 @@ void SensorSendTask(byte TaskIndex)
   {
     byte varIndex = TaskIndex * VARS_PER_TASK;
 
-    boolean success = false;
+    bool success = false;
     byte DeviceIndex = getDeviceIndex(Settings.TaskDeviceNumber[TaskIndex]);
     LoadTaskSettings(TaskIndex);
 
@@ -814,13 +863,10 @@ void SensorSendTask(byte TaskIndex)
       {
         if (ExtraTaskSettings.TaskDeviceFormula[varNr][0] != 0)
         {
-          String spreValue = String(preValue[varNr]);
           String formula = ExtraTaskSettings.TaskDeviceFormula[varNr];
-          float value = UserVar[varIndex + varNr];
+          formula.replace(F("%pvalue%"), String(preValue[varNr]));
+          formula.replace(F("%value%"), String(UserVar[varIndex + varNr]));
           float result = 0;
-          String svalue = String(value);
-          formula.replace(F("%pvalue%"), spreValue);
-          formula.replace(F("%value%"), svalue);
           byte error = Calculate(formula.c_str(), &result);
           if (error == 0)
             UserVar[varIndex + varNr] = result;
@@ -841,7 +887,7 @@ void backgroundtasks()
 {
   //checkRAM(F("backgroundtasks"));
   //always start with a yield
-  yield();
+  delay(0);
 /*
   // Remove this watchdog feed for now.
   // See https://github.com/letscontrolit/ESPEasy/issues/1722#issuecomment-419659193
@@ -858,12 +904,13 @@ void backgroundtasks()
   {
     return;
   }
+  START_TIMER
   runningBackgroundTasks=true;
 
   #if defined(ESP8266)
     tcpCleanup();
   #endif
-  process_serialLogBuffer();
+  process_serialWriteBuffer();
   if(!UseRTOSMultitasking){
     if (Settings.UseSerial)
       if (Serial.available())
@@ -884,15 +931,16 @@ void backgroundtasks()
   //once OTA is triggered, only handle that and dont do other stuff. (otherwise it fails)
   while (ArduinoOTAtriggered)
   {
-    yield();
+    delay(0);
     ArduinoOTA.handle();
   }
 
   #endif
 
-  yield();
+  delay(0);
 
   statusLED(false);
 
   runningBackgroundTasks=false;
+  STOP_TIMER(BACKGROUND_TASKS);
 }

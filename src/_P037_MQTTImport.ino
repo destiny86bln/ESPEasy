@@ -41,6 +41,7 @@ void Plugin_037_try_connect() {
   if (MQTTclient_037_connected) return;
   // workaround see: https://github.com/esp8266/Arduino/issues/4497#issuecomment-373023864
   espclient_037 = WiFiClient();
+  espclient_037.setTimeout(CONTROLLER_CLIENTTIMEOUT_DFLT);
 
   if (MQTTclient_037 == NULL) {
     MQTTclient_037 = new PubSubClient(espclient_037);
@@ -62,6 +63,8 @@ void Plugin_037_update_connect_status() {
   }
   if (MQTTclient_037_connected != connected) {
     MQTTclient_037_connected = !MQTTclient_037_connected;
+    P037_MQTTImport_connected  = MQTTclient_037_connected;
+
     if (Settings.UseRules) {
       String event = connected ? F("MQTTimport#Connected") : F("MQTTimport#Disconnected");
       rulesProcessing(event);
@@ -69,6 +72,7 @@ void Plugin_037_update_connect_status() {
     if (!connected) {
       // workaround see: https://github.com/esp8266/Arduino/issues/4497#issuecomment-373023864
       espclient_037 = WiFiClient();
+      espclient_037.setTimeout(CONTROLLER_CLIENTTIMEOUT_DFLT);
       ++reconnectCount;
       addLog(LOG_LEVEL_ERROR, F("IMPT : MQTT 037 Connection lost"));
     }
@@ -121,7 +125,7 @@ boolean Plugin_037(byte function, struct EventStruct *event, String& string)
 
         for (byte varNr = 0; varNr < 4; varNr++)
         {
-        	addFormTextBox(String(F("MQTT Topic ")) + (varNr + 1), String(F("Plugin_037_template")) +
+        	addFormTextBox(String(F("MQTT Topic ")) + (varNr + 1), String(F("p037_template")) +
         			(varNr + 1), deviceTemplate[varNr], 40);
         }
         success = true;
@@ -130,13 +134,17 @@ boolean Plugin_037(byte function, struct EventStruct *event, String& string)
 
     case PLUGIN_WEBFORM_SAVE:
       {
-        String argName;
-
+        String error;
         for (byte varNr = 0; varNr < 4; varNr++)
         {
-          argName = F("Plugin_037_template");
+          String argName = F("p037_template");
           argName += varNr + 1;
-          strncpy(deviceTemplate[varNr], WebServer.arg(argName).c_str(), sizeof(deviceTemplate[varNr]));
+          if (!safe_strncpy(deviceTemplate[varNr], WebServer.arg(argName).c_str(), sizeof(deviceTemplate[varNr]))) {
+            error += getCustomTaskSettingsError(varNr);
+          }
+        }
+        if (error.length() > 0) {
+          addHtmlError(error);
         }
 
         SaveCustomTaskSettings(event->TaskIndex, (byte*)&deviceTemplate, sizeof(deviceTemplate));
@@ -258,7 +266,7 @@ boolean Plugin_037(byte function, struct EventStruct *event, String& string)
 
             if (Settings.UseRules)
             {
-              String RuleEvent = F("");
+              String RuleEvent = "";
               RuleEvent += getTaskDeviceName(event->TaskIndex);
               RuleEvent += F("#");
               RuleEvent += ExtraTaskSettings.TaskDeviceValueNames[x];
@@ -390,7 +398,7 @@ boolean MQTTConnect_037()
     Plugin_037_update_connect_status();
     return false; // Not connected, so no use in wasting time to connect to a host.
   }
-  ControllerSettingsStruct ControllerSettings;
+  MakeControllerSettings(ControllerSettings);
   LoadControllerSettings(enabledMqttController, ControllerSettings);
   if (ControllerSettings.UseDNS) {
     MQTTclient_037->setServer(ControllerSettings.getHost().c_str(), ControllerSettings.Port);
@@ -435,7 +443,7 @@ boolean MQTTConnect_037()
 //
 // Check to see if Topic matches the MQTT subscription
 //
-boolean MQTTCheckSubscription_037(String Topic, String Subscription) {
+boolean MQTTCheckSubscription_037(const String& Topic, const String& Subscription) {
 
   String tmpTopic = Topic;
   String tmpSub = Subscription;
@@ -451,10 +459,10 @@ boolean MQTTCheckSubscription_037(String Topic, String Subscription) {
   // Add trailing / if required
 
   int lenTopic = tmpTopic.length();
-  if (tmpTopic.substring(lenTopic - 1, lenTopic) != "/")tmpTopic += F("/");
+  if (tmpTopic.substring(lenTopic - 1, lenTopic) != "/")tmpTopic += '/';
 
   int lenSub = tmpSub.length();
-  if (tmpSub.substring(lenSub - 1, lenSub) != "/")tmpSub += F("/");
+  if (tmpSub.substring(lenSub - 1, lenSub) != "/")tmpSub += '/';
 
   // Now get first part
 

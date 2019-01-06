@@ -1,6 +1,11 @@
 
 #define WIFI_AP_OFF_TIMER_DURATION  60000   // in milliSeconds
 
+bool unprocessedWifiEvents() {
+  if (processedConnect && processedGetIP && processedDisconnect) return false;
+  return true;
+}
+
 //********************************************************************************
 // Functions to process the data gathered from the events.
 // These functions are called from Setup() or Loop() and thus may call delay() or yield()
@@ -14,7 +19,7 @@ void processConnect() {
   if (loglevelActiveFor(LOG_LEVEL_INFO)) {
     String log = F("WIFI : Connected! AP: ");
     log += WiFi.SSID();
-    log += F(" (");
+    log += " (";
     log += WiFi.BSSIDstr();
     log += F(") Ch: ");
     log += last_channel;
@@ -47,7 +52,7 @@ void processDisconnect() {
   if (loglevelActiveFor(LOG_LEVEL_INFO)) {
     String log = F("WIFI : Disconnected! Reason: '");
     log += getLastDisconnectReason();
-    log += F("'");
+    log += '\'';
     if (lastConnectedDuration > 0) {
       log += F(" Connected for ");
       log += format_msec_duration(lastConnectedDuration);
@@ -77,7 +82,7 @@ void processGotIP() {
       log += F("DHCP IP: ");
     }
     log += formatIP(ip);
-    log += F(" (");
+    log += " (";
     log += WifiGetHostname();
     log += F(") GW: ");
     log += formatIP(gw);
@@ -241,11 +246,23 @@ void processScanDone() {
 
 void resetWiFi() {
   addLog(LOG_LEVEL_INFO, F("Reset WiFi."));
-  setWifiMode(WIFI_OFF);
-  setWifiMode(WIFI_STA);
+//  setWifiMode(WIFI_OFF);
+//  setWifiMode(WIFI_STA);
   lastDisconnectMoment = millis();
   processedDisconnect = false;
   wifiStatus = ESPEASY_WIFI_DISCONNECTED;
+}
+
+void connectionCheckHandler()
+{
+  if (reconnectChecker == false && !WiFiConnected()){
+    reconnectChecker = true;
+    resetWiFi();
+    WiFi.reconnect();
+  }
+  else if (WiFiConnected() && reconnectChecker == true){
+    reconnectChecker = false;
+  }
 }
 
 void WifiScanAsync() {
@@ -318,7 +335,8 @@ void setSTA(bool enable) {
 }
 
 void setAP(bool enable) {
-  switch(WiFi.getMode()) {
+  WiFiMode_t wifimode = WiFi.getMode();
+  switch(wifimode) {
     case WIFI_OFF:
       if (enable) setWifiMode(WIFI_AP);
       break;
@@ -334,13 +352,20 @@ void setAP(bool enable) {
     default:
       break;
   }
-  setAPinternal(enable);
+  if (WifiIsAP(wifimode) && !enable) {
+    String event = F("WiFi#APmodeDisabled");
+    rulesProcessing(event);
+  }
+  if (WifiIsAP(wifimode) != enable) {
+    // Mode has changed
+    setAPinternal(enable);
+  }
 }
 
 //Only internal scope
 void setAPinternal(bool enable)
 {
-    if (enable) {
+  if (enable) {
     timerAPoff = millis() + WIFI_AP_OFF_TIMER_DURATION;
     // create and store unique AP SSID/PW to prevent ESP from starting AP mode with default SSID and No password!
     // setup ssid for AP Mode when needed
@@ -352,6 +377,8 @@ void setAPinternal(bool enable)
     }
     if (WiFi.softAP(softAPSSID.c_str(),pwd.c_str())) {
       if (loglevelActiveFor(LOG_LEVEL_INFO)) {
+        String event = F("WiFi#APmodeEnabled");
+        rulesProcessing(event);
         String log(F("WIFI : AP Mode ssid will be "));
         log += softAPSSID;
         log += F(" with address ");
@@ -419,7 +446,7 @@ String WifiGetAPssid()
 {
   String ssid(Settings.Name);
   if (Settings.appendUnitToHostname()) {
-    ssid+=F("_");
+    ssid+="_";
     ssid+=Settings.Unit;
   }
   return (ssid);
@@ -431,8 +458,8 @@ String WifiGetAPssid()
 String WifiGetHostname()
 {
   String hostname(WifiGetAPssid());
-  hostname.replace(F(" "), F("-"));
-  hostname.replace(F("_"), F("-")); // See RFC952
+  hostname.replace(" ", "-");
+  hostname.replace("_", "-"); // See RFC952
   return (hostname);
 }
 
@@ -442,8 +469,18 @@ bool useStaticIP() {
 }
 
 bool WiFiConnected() {
+  START_TIMER;
   // For ESP82xx, do not rely on WiFi.status() with event based wifi.
-  return wifiStatus == ESPEASY_WIFI_SERVICES_INITIALIZED;
+  if (wifiStatus == ESPEASY_WIFI_SERVICES_INITIALIZED) {
+    if (WiFi.isConnected()) {
+      STOP_TIMER(WIFI_ISCONNECTED_STATS);
+      return true;
+    }
+    // else wifiStatus is no longer in sync.
+    resetWiFi();
+  }
+  delay(1);
+  return false;
 }
 
 void WiFiConnectRelaxed() {
@@ -470,7 +507,7 @@ bool prepareWiFi() {
   }
   setSTA(true);
   char hostname[40];
-  strncpy(hostname, WifiGetHostname().c_str(), sizeof(hostname));
+  safe_strncpy(hostname, WifiGetHostname().c_str(), sizeof(hostname));
   #if defined(ESP8266)
     wifi_station_set_hostname(hostname);
   #endif
@@ -645,6 +682,8 @@ void WifiDisconnect()
     wifi_station_disconnect();
     ETS_UART_INTR_ENABLE();
   #endif
+  wifiStatus = ESPEASY_WIFI_DISCONNECTED;
+  processedDisconnect = false;
 }
 
 
@@ -654,30 +693,31 @@ void WifiDisconnect()
 void WifiScan()
 {
   // Direct Serial is allowed here, since this function will only be called from serial input.
-  Serial.println(F("WIFI : SSID Scan start"));
+  serialPrintln(F("WIFI : SSID Scan start"));
   int n = WiFi.scanNetworks(false, true);
   if (n == 0)
-    Serial.println(F("WIFI : No networks found"));
+    serialPrintln(F("WIFI : No networks found"));
   else
   {
-    Serial.print(F("WIFI : "));
-    Serial.print(n);
-    Serial.println(F(" networks found"));
+    serialPrint(F("WIFI : "));
+    serialPrint(String(n));
+    serialPrintln(F(" networks found"));
     for (int i = 0; i < n; ++i)
     {
       // Print SSID and RSSI for each network found
-      Serial.print(F("WIFI : "));
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.println(formatScanResult(i, " "));
+      serialPrint(F("WIFI : "));
+      serialPrint(String(i + 1));
+      serialPrint(": ");
+      serialPrintln(formatScanResult(i, " "));
       delay(10);
     }
   }
-  Serial.println("");
+  serialPrintln("");
 }
 
 String formatScanResult(int i, const String& separator) {
   String result = WiFi.SSID(i);
+  htmlEscape(result);
   #ifndef ESP32
   if (WiFi.isHidden(i)) {
     result += F("#Hidden#");
@@ -688,7 +728,7 @@ String formatScanResult(int i, const String& separator) {
   result += separator;
   result += F("Ch:");
   result += WiFi.channel(i);
-  result += F(" (");
+  result += " (";
   result += WiFi.RSSI(i);
   result += F("dBm) ");
   switch (WiFi.encryptionType(i)) {
@@ -835,7 +875,7 @@ bool getSubnetRange(IPAddress& low, IPAddress& high)
 
 
 String getLastDisconnectReason() {
-  String reason = F("(");
+  String reason = "(";
   reason += lastDisconnectReason;
   reason += F(") ");
   switch (lastDisconnectReason) {

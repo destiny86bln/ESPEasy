@@ -2,7 +2,6 @@
   SPIFFS error handling
   Look here for error # reference: https://github.com/pellepl/spiffs/blob/master/src/spiffs.h
   \*********************************************************************************************/
-#define SPIFFS_CHECK(result, fname) if (!(result)) { return(FileError(__LINE__, fname)); }
 String FileError(int line, const char * fname)
 {
    String err = F("FS   : Error while reading/writing ");
@@ -41,13 +40,26 @@ String flashGuard()
 //use this in function that can return an error string. it automaticly returns with an error string if there where too many flash writes.
 #define FLASH_GUARD() { String flashErr=flashGuard(); if (flashErr.length()) return(flashErr); }
 
+
+String appendLineToFile(const String& fname, const String& line) {
+  fs::File f = SPIFFS.open(fname, "a+");
+  SPIFFS_CHECK(f, fname.c_str());
+  const size_t lineLength = line.length();
+  for (size_t i = 0; i < lineLength; ++i) {
+    SPIFFS_CHECK(f.write(line[i]), fname.c_str());
+  }
+  f.close();
+  return "";
+}
+
+
 /********************************************************************************************\
   Fix stuff to clear out differences between releases
   \*********************************************************************************************/
 String BuildFixes()
 {
   checkRAM(F("BuildFixes"));
-  Serial.println(F("\nBuild changed!"));
+  serialPrintln(F("\nBuild changed!"));
 
   if (Settings.Build < 145)
   {
@@ -67,19 +79,24 @@ String BuildFixes()
 
   if (Settings.Build < 20101)
   {
-    Serial.println(F("Fix reset Pin"));
+    serialPrintln(F("Fix reset Pin"));
     Settings.Pin_Reset = -1;
   }
   if (Settings.Build < 20102) {
     // Settings were 'mangled' by using older version
     // Have to patch settings to make sure no bogus data is being used.
-    Serial.println(F("Fix settings with uninitalized data or corrupted by switching between versions"));
+    serialPrintln(F("Fix settings with uninitalized data or corrupted by switching between versions"));
     Settings.UseRTOSMultitasking = false;
     Settings.Pin_Reset = -1;
     Settings.SyslogFacility = DEFAULT_SYSLOG_FACILITY;
-    Settings.MQTTUseUnitNameAsClientId = DEFAULT_MQTT_USE_UNITNANE_AS_CLIENTID;
+    Settings.MQTTUseUnitNameAsClientId = DEFAULT_MQTT_USE_UNITNAME_AS_CLIENTID;
     Settings.StructSize = sizeof(Settings);
   }
+  if (Settings.Build < 20103) {
+    Settings.ResetFactoryDefaultPreference = 0;
+    Settings.OldRulesEngine(DEFAULT_RULES_OLDENGINE);
+  }
+
 
   Settings.Build = BUILD;
   return(SaveSettings());
@@ -113,12 +130,12 @@ void fileSystemCheck()
     {
       ResetFactory();
     }
-    f.close();
+    if (f) f.close();
   }
   else
   {
     String log = F("FS   : Mount failed");
-    Serial.println(log);
+    serialPrintln(log);
     addLog(LOG_LEVEL_ERROR, log);
     ResetFactory();
   }
@@ -150,7 +167,11 @@ String SaveSettings(void)
     Settings.validate();
     err=SaveToFile((char*)FILE_CONFIG, 0, (byte*)&Settings, sizeof(Settings));
     if (err.length())
-     return(err);
+      return(err);
+    // Must check this after saving, or else it is not possible to fix multiple
+    // issues which can only corrected on different pages.
+    if (!SettingsCheck(err)) return err;
+
 //  }
 
   memcpy( SecuritySettings.ProgmemMd5, CRCValues.runTimeMD5, 16);
@@ -167,7 +188,20 @@ String SaveSettings(void)
       wifiSetupConnect = true;
     }
   }
+  afterloadSettings();
   return (err);
+}
+
+void afterloadSettings() {
+  ExtraTaskSettings.clear(); // make sure these will not contain old settings.
+  ResetFactoryDefaultPreference_struct pref(Settings.ResetFactoryDefaultPreference);
+  DeviceModel model = pref.getDeviceModel();
+  // TODO TD-er: Try to get the information from more locations to make it more persistent
+  // Maybe EEPROM location?
+
+  if (modelMatchingFlashSize(model)) {
+    ResetFactoryDefaultPreference = Settings.ResetFactoryDefaultPreference;
+  }
 }
 
 /********************************************************************************************\
@@ -217,7 +251,7 @@ String LoadSettings()
     addLog(LOG_LEVEL_ERROR, F("CRC  : SecuritySettings CRC   ...FAIL"));
   }
   setUseStaticIP(useStaticIP());
-  ExtraTaskSettings.clear(); // make sure these will not contain old settings.
+  afterloadSettings();
   return(err);
 }
 
@@ -385,6 +419,7 @@ String LoadTaskSettings(byte TaskIndex)
   checkRAM(F("LoadTaskSettings"));
   if (ExtraTaskSettings.TaskIndex == TaskIndex)
     return(String()); //already loaded
+  START_TIMER
   ExtraTaskSettings.clear();
   String result = "";
   result = LoadFromFile(TaskSettings_Type, TaskIndex, (char*)FILE_CONFIG, (byte*)&ExtraTaskSettings, sizeof(struct ExtraTaskSettingsStruct));
@@ -399,6 +434,7 @@ String LoadTaskSettings(byte TaskIndex)
     //the plugin call should populate ExtraTaskSettings with its default values.
     PluginCall(PLUGIN_GET_DEVICEVALUENAMES, &TempEvent, dummyString);
   }
+  STOP_TIMER(LOAD_TASK_SETTINGS);
 
   return result;
 }
@@ -411,6 +447,13 @@ String SaveCustomTaskSettings(int TaskIndex, byte* memAddress, int datasize)
 {
   checkRAM(F("SaveCustomTaskSettings"));
   return(SaveToFile(CustomTaskSettings_Type, TaskIndex, (char*)FILE_CONFIG, memAddress, datasize));
+}
+
+String getCustomTaskSettingsError(byte varNr) {
+  String error = F("Error: Text too long for line ");
+  error += varNr + 1;
+  error += '\n';
+  return error;
 }
 
 
@@ -428,8 +471,11 @@ String ClearCustomTaskSettings(int TaskIndex)
   \*********************************************************************************************/
 String LoadCustomTaskSettings(int TaskIndex, byte* memAddress, int datasize)
 {
+  START_TIMER;
   checkRAM(F("LoadCustomTaskSettings"));
-  return(LoadFromFile(CustomTaskSettings_Type, TaskIndex, (char*)FILE_CONFIG, memAddress, datasize));
+  String result = LoadFromFile(CustomTaskSettings_Type, TaskIndex, (char*)FILE_CONFIG, memAddress, datasize);
+  STOP_TIMER(LOAD_CUSTOM_TASK_STATS);
+  return result;
 }
 
 /********************************************************************************************\
@@ -518,13 +564,15 @@ String InitFile(const char* fname, int datasize)
   FLASH_GUARD();
 
   fs::File f = SPIFFS.open(fname, "w");
-  SPIFFS_CHECK(f, fname);
+  if (f) {
+    SPIFFS_CHECK(f, fname);
 
-  for (int x = 0; x < datasize ; x++)
-  {
-    SPIFFS_CHECK(f.write(0), fname);
+    for (int x = 0; x < datasize ; x++)
+    {
+      SPIFFS_CHECK(f.write(0), fname);
+    }
+    f.close();
   }
-  f.close();
 
   //OK
   return String();
@@ -535,6 +583,15 @@ String InitFile(const char* fname, int datasize)
   \*********************************************************************************************/
 String SaveToFile(char* fname, int index, byte* memAddress, int datasize)
 {
+#ifndef ESP32
+  if (allocatedOnStack(memAddress)) {
+    String log = F("SaveToFile: ");
+    log += fname;
+    log += F(" ERROR, Data allocated on stack");
+    addLog(LOG_LEVEL_ERROR, log);
+//    return log;  // FIXME TD-er: Should this be considered a breaking error?
+  }
+#endif
   if (index < 0) {
     String log = F("SaveToFile: ");
     log += fname;
@@ -542,24 +599,52 @@ String SaveToFile(char* fname, int index, byte* memAddress, int datasize)
     addLog(LOG_LEVEL_ERROR, log);
     return log;
   }
-
+  START_TIMER;
   checkRAM(F("SaveToFile"));
   FLASH_GUARD();
-
-  fs::File f = SPIFFS.open(fname, "r+");
-  SPIFFS_CHECK(f, fname);
-
-  SPIFFS_CHECK(f.seek(index, fs::SeekSet), fname);
-  byte *pointerToByteToSave = memAddress;
-  for (int x = 0; x < datasize ; x++)
   {
-    SPIFFS_CHECK(f.write(*pointerToByteToSave), fname);
-    pointerToByteToSave++;
+    String log = F("SaveToFile: free stack: ");
+    log += getCurrentFreeStack();
+    addLog(LOG_LEVEL_INFO, log);
   }
-  f.close();
-  String log = F("FILE : Saved ");
-  log=log+fname;
-  addLog(LOG_LEVEL_INFO, log);
+  delay(1);
+  unsigned long timer = millis() + 50;
+  fs::File f = SPIFFS.open(fname, "r+");
+  if (f) {
+    SPIFFS_CHECK(f, fname);
+    SPIFFS_CHECK(f.seek(index, fs::SeekSet), fname);
+    byte *pointerToByteToSave = memAddress;
+    for (int x = 0; x < datasize ; x++)
+    {
+      SPIFFS_CHECK(f.write(*pointerToByteToSave), fname);
+      pointerToByteToSave++;
+      if (x % 256 == 0) {
+        // one page written, do some background tasks
+        timer = millis() + 50;
+        delay(0);
+      }
+      if (timeOutReached(timer) ) {
+        timer += 50;
+        delay(0);
+      }
+    }
+    f.close();
+    String log = F("FILE : Saved ");
+    log=log+fname;
+    addLog(LOG_LEVEL_INFO, log);
+  } else {
+    String log = F("SaveToFile: ");
+    log += fname;
+    log += F(" ERROR, Cannot save to file");
+    addLog(LOG_LEVEL_ERROR, log);
+    return log;
+  }
+  STOP_TIMER(SAVEFILE_STATS);
+  {
+    String log = F("SaveToFile: free stack after: ");
+    log += getCurrentFreeStack();
+    addLog(LOG_LEVEL_INFO, log);
+  }
 
   //OK
   return String();
@@ -582,14 +667,22 @@ String ClearInFile(char* fname, int index, int datasize)
   FLASH_GUARD();
 
   fs::File f = SPIFFS.open(fname, "r+");
-  SPIFFS_CHECK(f, fname);
+  if (f) {
+    SPIFFS_CHECK(f, fname);
 
-  SPIFFS_CHECK(f.seek(index, fs::SeekSet), fname);
-  for (int x = 0; x < datasize ; x++)
-  {
-    SPIFFS_CHECK(f.write(0), fname);
+    SPIFFS_CHECK(f.seek(index, fs::SeekSet), fname);
+    for (int x = 0; x < datasize ; x++)
+    {
+      SPIFFS_CHECK(f.write(0), fname);
+    }
+    f.close();
+  } else {
+    String log = F("ClearInFile: ");
+    log += fname;
+    log += F(" ERROR, Cannot save to file");
+    addLog(LOG_LEVEL_ERROR, log);
+    return log;
   }
-  f.close();
 
   //OK
   return String();
@@ -608,10 +701,10 @@ String LoadFromFile(char* fname, int offset, byte* memAddress, int datasize)
     addLog(LOG_LEVEL_ERROR, log);
     return log;
   }
+  delay(1);
   START_TIMER;
 
   checkRAM(F("LoadFromFile"));
-
   fs::File f = SPIFFS.open(fname, "r+");
   SPIFFS_CHECK(f, fname);
   SPIFFS_CHECK(f.seek(offset, fs::SeekSet), fname);
@@ -619,6 +712,7 @@ String LoadFromFile(char* fname, int offset, byte* memAddress, int datasize)
   f.close();
 
   STOP_TIMER(LOADFILE_STATS);
+  delay(1);
 
   return(String());
 }
